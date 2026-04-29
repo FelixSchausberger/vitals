@@ -1,0 +1,181 @@
+name: Vitals CI/CD
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "core/**"
+      - "daemon/**"
+      - "tui/**"
+      - "cli/**"
+      - "scorer/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "core/**"
+      - "daemon/**"
+      - "tui/**"
+      - "cli/**"
+      - "scorer/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+# Permissions for security and artifacts
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+  security-events: write
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    allow-import-from-derivation = true
+    accept-flake-config = true
+    # Optimized substituters with faster mirrors first
+    extra-substituters = https://cache.nixos.org https://nix-community.cachix.org https://cache.garnix.io
+    extra-trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g=
+    # Performance optimizations
+    max-jobs = auto
+    cores = 0
+    builders-use-substitutes = true
+jobs:
+  # Validate files and configurations
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Validate workspace structure
+        run: |
+          echo "=== Validating Cargo Workspace ==="
+
+          # Check workspace members exist
+          for member in core scorer daemon tui cli; do
+            if [ -f "$member/Cargo.toml" ]; then
+              echo "✅ Workspace member '$member' found"
+            else
+              echo "❌ Workspace member '$member/Cargo.toml' missing"
+              exit 1
+            fi
+          done
+
+          # Validate workspace Cargo.toml
+          if grep -q "members.*core.*scorer.*daemon.*tui.*cli" Cargo.toml; then
+            echo "✅ Workspace members properly configured"
+          else
+            echo "❌ Workspace members not configured correctly"
+            exit 1
+          fi
+
+          echo "✅ Workspace structure is valid"
+      - name: Validate Cargo.toml files
+        run: |
+          echo "=== Validating TOML Files ==="
+          for toml in Cargo.toml core/Cargo.toml scorer/Cargo.toml daemon/Cargo.toml tui/Cargo.toml cli/Cargo.toml; do
+            if command -v taplo >/dev/null 2>&1; then
+              taplo check "$toml" && echo "✅ $toml is valid" || { echo "❌ $toml has errors"; exit 1; }
+            else
+              # Basic TOML validation without taplo
+              if cat "$toml" | python3 -c "import sys, tomllib; tomllib.loads(sys.stdin.read())" 2>/dev/null; then
+                echo "✅ $toml is valid"
+              else
+                echo "❌ $toml is invalid TOML"
+                exit 1
+              fi
+            fi
+          done
+  # Security scanning
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+      - name: Run cargo audit
+        run: |
+          cargo install cargo-audit
+          cargo audit --deny warnings || echo "⚠️ Security advisories found"
+  # Pre-commit hooks validation
+  pre-commit:
+    name: Pre-commit Checks
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v26
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v14
+        if: env.CACHIX_AUTH_TOKEN != ''
+        with:
+          name: nix-community
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+      - name: Run prek pre-commit checks
+        run: |
+          echo "=== Running Pre-commit Hooks via prek ==="
+          nix develop --command bash -c "
+            echo 'Installing prek hooks...'
+            prek install
+
+            echo 'Running all pre-commit checks...'
+            prek run --all-files
+          "
+          echo "✅ All pre-commit checks passed"
+  # Code quality and formatting
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v26
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - name: Format check
+        run: |
+          echo "=== Checking Code Formatting ==="
+          nix develop --command bash -c "
+            cargo fmt --all --check
+          "
+          echo "✅ Code is properly formatted"
+      - name: Clippy check
+        run: |
+          echo "=== Running Clippy Linter ==="
+          nix develop --command bash -c "
+            cargo clippy --workspace --all-targets -- -D warnings
+          "
+          echo "✅ Clippy checks passed"
+  # Deployment readiness check (heavy builds handled by Garnix CI)
+  deployment:
+    name: Deployment Ready
+    runs-on: ubuntu-latest
+    needs: [validate, quality]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Deployment status
+        run: |-
+          echo "✅ All validation and quality checks passed"
+          echo "🚀 Vitals is ready for deployment"
+          echo "Note: Full builds and integration tests handled by Garnix CI"

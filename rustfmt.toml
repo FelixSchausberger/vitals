@@ -1,0 +1,14 @@
+# rustfmt configuration for vitals
+# Using nightly rustfmt for advanced import ordering
+
+# Import ordering: group imports by standard library, external crates, and current crate
+group_imports = "StdExternalCrate"
+
+# Import granularity: organize imports by crate
+imports_granularity = "Crate"
+
+# Standard formatting settings
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+use_small_heuristics = "Default"

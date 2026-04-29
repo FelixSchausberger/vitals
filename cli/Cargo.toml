@@ -1,0 +1,41 @@
+[package]
+name = "vitals-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI client for the vitals health monitoring daemon"
+keywords = ["monitoring", "health", "cli", "systemd"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "vitals"
+path = "src/main.rs"
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# CLI parsing
+clap = { workspace = true, features = ["env", "color"] }
+
+# Time handling
+time.workspace = true
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
+
+# Async runtime
+tokio = { workspace = true }
+
+[lints]
+workspace = true

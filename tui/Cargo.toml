@@ -1,0 +1,48 @@
+[package]
+name = "vitals-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for vitals system monitoring"
+keywords = ["tui", "monitoring", "systemd", "journald"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "vitals-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Shared core models
+vitals-core = { path = "../core" }
+
+# TUI framework
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# HTTP client for daemon API (using rustls to avoid OpenSSL dependency)
+reqwest = { version = "0.12", features = [
+  "json",
+  "rustls-tls",
+], default-features = false }
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# CLI parsing
+clap.workspace = true
+
+# Check if stdout is a TTY
+atty = "0.2"
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+[workspace]
+members = ["vitals-core", "vitals-daemon"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["schausberger"]
+license = "MIT"
+repository = "https://github.com/schausberger/vitals"
+
+[workspace.dependencies]
+# Shared core
+vitals-core = { path = "./vitals-core" }
+
+# Serialization
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.132"
+
+# Time handling
+time = { version = "0.3.36", features = ["serde", "formatting", "parsing", "macros"] }
+
+# Error handling
+thiserror = "1.0.69"
+anyhow = { version = "1.0.92", features = ["backtrace"] }
+
+# Async runtime
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream", "events"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }

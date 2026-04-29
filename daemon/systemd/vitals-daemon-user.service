@@ -1,0 +1,33 @@
+[Unit]
+Description=Vitals System Monitoring Daemon (User Mode)
+Documentation=https://github.com/schausberger/vitals
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/vitals-daemon --mode live
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Security (user services have some restrictions automatically)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+RestrictRealtime=yes
+
+# Resource limits
+MemoryMax=256M
+TasksMax=50
+
+# Environment
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,55 @@
+# Pre-commit configuration for vitals workspace
+exclude: |
+  (?x)^(
+    target/.*|
+    .*/target/.*|
+    Cargo\.lock
+  )$
+repos:
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.13.0
+    hooks:
+      - id: yamlfmt
+  - repo: https://github.com/sirwart/ripsecrets
+    rev: v0.1.8
+    hooks:
+      - id: ripsecrets
+        args: [--strict-ignore]
+  - repo: local
+    hooks:
+      - id: trailing-whitespace
+        name: trailing-whitespace fixer
+        entry: tools/scripts/trailing-whitespace.sh
+        language: system
+        pass_filenames: true
+      - id: taplo-format
+        name: Taplo TOML formatter
+        entry: taplo format
+        language: system
+        files: \.toml$
+        pass_filenames: true
+      - id: cargo-fmt
+        name: cargo fmt (workspace)
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy (workspace)
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-check
+        name: cargo check (workspace)
+        entry: cargo check --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-test
+        name: cargo test (workspace)
+        entry: cargo test --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [push]

@@ -1,0 +1,69 @@
+[package]
+name = "vitals-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lightweight system health monitoring daemon with journald and systemd integration"
+keywords = ["daemon", "monitoring", "systemd", "journald", "health"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "vitals-daemon"
+path = "src/bin/daemon.rs"
+
+[dependencies]
+# Shared core models
+vitals-core = { path = "../core" }
+
+# Scorer algorithm
+scorer.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["signal"] }
+tokio-stream = "0.1.17"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI parsing
+clap = { workspace = true, features = ["env", "color"] }
+
+# Time handling
+time.workspace = true
+
+# Regular expressions for issue matching
+regex = "1.10"
+
+# System integration
+zbus = "5.1"
+systemd = { version = "0.10", default-features = false, features = ["journal"] }
+sysinfo = "0.32"
+procfs = "0.17"
+num_cpus = "1.16"
+
+# Web server for daemon HTTP API
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+
+# Configuration
+toml = { version = "0.8", features = ["preserve_order"] }
+dirs = "5.0"
+
+[dev-dependencies]
+tokio-test = "0.4.4"
+tempfile = "3.0"
+
+[lints]
+workspace = true

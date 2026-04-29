@@ -1,0 +1,273 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        type: string
+permissions:
+  contents: write
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    allow-import-from-derivation = true
+    accept-flake-config = true
+    extra-substituters = https://cache.nixos.org https://nix-community.cachix.org
+    extra-trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+    max-jobs = auto
+    cores = 0
+jobs:
+  build-static:
+    name: Build Static Binaries
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v26
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - name: Build static binaries
+        run: |
+          echo "=== Building Static Binaries for ${{ matrix.target }} ==="
+
+          # Build with static linking for maximum compatibility
+          nix develop --command bash -c "
+            export CARGO_TARGET_DIR=target-static
+            export RUSTFLAGS='-C target-feature=+crt-static'
+
+            echo 'Building workspace binaries...'
+            cargo build --workspace --release --target ${{ matrix.target }}
+
+            echo ''
+            echo '=== Build Complete ==='
+            ls -lh target-static/${{ matrix.target }}/release/vitals* 2>/dev/null || echo 'No binaries found'
+          "
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+
+          # Copy daemon binary
+          if [ -f target-static/${{ matrix.target }}/release/vitals-daemon ]; then
+            cp target-static/${{ matrix.target }}/release/vitals-daemon dist/vitals-daemon-${{ matrix.arch }}
+            echo "✅ Daemon binary prepared"
+          else
+            echo "⚠️ Daemon binary not found"
+          fi
+
+          # Copy TUI binary
+          if [ -f target-static/${{ matrix.target }}/release/vitals-tui ]; then
+            cp target-static/${{ matrix.target }}/release/vitals-tui dist/vitals-tui-${{ matrix.arch }}
+            echo "✅ TUI binary prepared"
+          else
+            echo "⚠️ TUI binary not found"
+          fi
+
+          # Copy CLI binary
+          if [ -f target-static/${{ matrix.target }}/release/vitals ]; then
+            cp target-static/${{ matrix.target }}/release/vitals dist/vitals-${{ matrix.arch }}
+            echo "✅ CLI binary prepared"
+          else
+            echo "⚠️ CLI binary not found"
+          fi
+
+          # Create checksums
+          cd dist
+          if ls vitals-* 1> /dev/null 2>&1; then
+            sha256sum vitals-* > checksums-${{ matrix.arch }}.txt
+            echo "✅ Checksums created"
+
+            # Make binaries executable
+            chmod +x vitals-* || true
+          else
+            echo "⚠️ No binaries to create checksums for"
+          fi
+
+          echo ""
+          echo "=== Artifacts prepared ==="
+          ls -la
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: warn
+  create-release:
+    name: Create Release
+    needs: [build-static]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          echo "=== Collecting Release Assets ==="
+
+          # Combine static binaries
+          find artifacts -name "vitals-*" -type f -executable -exec cp {} release-assets/ \; || true
+          find artifacts -name "checksums-*.txt" -exec cp {} release-assets/ \; || true
+
+          # Create combined checksums
+          cd release-assets
+          if ls vitals-* 1> /dev/null 2>&1; then
+            sha256sum vitals-* > SHA256SUMS
+            echo "✅ Combined checksums created"
+          else
+            echo "⚠️ No binaries found for checksums"
+          fi
+
+          echo ""
+          echo "=== Release Assets ==="
+          ls -la
+      - name: Get tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+      - name: Generate release notes
+        run: |
+          cat > release-notes.md << 'EOF'
+          ## 🩺 Vitals ${{ steps.tag.outputs.tag }}
+
+          > Lightweight system health monitoring suite for Linux with systemd integration
+
+          ### 📦 Downloads
+
+          #### Daemon (Backend Service)
+          - `vitals-daemon-x86_64` - Daemon for x86_64 Linux (with systemd support)
+          - `vitals-daemon-aarch64` - Daemon for ARM64 Linux (with systemd support)
+
+          #### TUI (Terminal Interface)
+          - `vitals-tui-x86_64` - Terminal UI for x86_64 Linux
+          - `vitals-tui-aarch64` - Terminal UI for ARM64 Linux
+
+          #### CLI (Query Tool)
+          - `vitals-x86_64` - CLI for x86_64 Linux
+          - `vitals-aarch64` - CLI for ARM64 Linux
+
+          ### 🚀 Installation
+
+          #### Quick Install (x86_64)
+          ```bash
+          # Download daemon
+          curl -LO https://github.com/schausberger/vitals/releases/download/${{ steps.tag.outputs.tag }}/vitals-daemon-x86_64
+          chmod +x vitals-daemon-x86_64
+          sudo mv vitals-daemon-x86_64 /usr/local/bin/vitals-daemon
+
+          # Download TUI
+          curl -LO https://github.com/schausberger/vitals/releases/download/${{ steps.tag.outputs.tag }}/vitals-tui-x86_64
+          chmod +x vitals-tui-x86_64
+          sudo mv vitals-tui-x86_64 /usr/local/bin/vitals-tui
+
+          # Download CLI
+          curl -LO https://github.com/schausberger/vitals/releases/download/${{ steps.tag.outputs.tag }}/vitals-x86_64
+          chmod +x vitals-x86_64
+          sudo mv vitals-x86_64 /usr/local/bin/vitals
+          ```
+
+          #### Nix Flake (Recommended for NixOS users)
+          ```bash
+          # Run directly
+          nix run github:schausberger/vitals/${{ steps.tag.outputs.tag }}
+
+          # Install to profile
+          nix profile install github:schausberger/vitals/${{ steps.tag.outputs.tag }}
+
+          # Development shell
+          nix develop github:schausberger/vitals/${{ steps.tag.outputs.tag }}
+          ```
+
+          ### ✅ Verification
+
+          All binaries include SHA256 checksums. Verify your downloads:
+          ```bash
+          # Download checksums
+          curl -LO https://github.com/schausberger/vitals/releases/download/${{ steps.tag.outputs.tag }}/SHA256SUMS
+
+          # Verify (requires downloaded binary in same directory)
+          sha256sum -c SHA256SUMS
+          ```
+
+          ### 🔧 Usage
+
+          #### Start the Daemon
+          ```bash
+          vitals-daemon
+          # Listens on http://localhost:8080
+          ```
+
+          #### Launch the TUI
+          ```bash
+          vitals-tui --daemon-url http://localhost:8080
+          # Press 'q' to quit
+          ```
+
+          #### Query the API
+          ```bash
+          # Health score
+          vitals health
+
+          # Prometheus metrics
+          vitals metrics
+          ```
+
+          ### 📊 Features
+
+          - **Health Monitoring**: Real-time system health score (0-100)
+          - **Issue Aggregation**: Intelligent log aggregation with severity levels
+          - **Resource Tracking**: CPU, memory, disk, and load average monitoring
+          - **JSON API**: RESTful API for programmatic access
+          - **Prometheus Metrics**: Native Prometheus exposition format
+          - **TUI Interface**: Beautiful terminal UI with color-coded status
+          - **SystemD Integration**: Direct journald and systemd unit monitoring
+
+          ### 🏗️ Architecture
+
+          Vitals is organized as a Cargo workspace:
+          - **vitals-core**: Shared data models and types
+          - **vitals-daemon**: Backend daemon with HTTP API
+          - **vitals-tui**: Terminal UI client
+          - **vitals-cli**: Command-line query tool
+
+          ### 📝 Changes
+
+          See the [CHANGELOG.md](CHANGELOG.md) for detailed changes in this release.
+
+          ---
+          *Built with ❤️ using Rust, Ratatui, and Nix*
+          EOF
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Vitals ${{ steps.tag.outputs.tag }}"
+          body_path: release-notes.md
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') || contains(steps.tag.outputs.tag, 'rc') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false

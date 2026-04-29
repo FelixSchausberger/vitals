@@ -1,0 +1,51 @@
+# Rust build artifacts
+target/
+debug/
+**/*.rs.bk
+*.pdb
+
+# Cargo mutation testing
+**/mutants.out*/
+
+# Nix build artifacts
+result
+result-*
+
+# direnv
+.direnv/
+
+# Editor and IDE files
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+.history/
+*.vsix
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Backup and temporary files
+*.bak
+*.tmp
+*.temp
+*~
+
+# Logs
+*.log
+
+# Claude Code MCP configuration (auto-generated, contains nix store paths)
+.mcp.json

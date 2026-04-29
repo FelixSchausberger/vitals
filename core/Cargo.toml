@@ -1,0 +1,25 @@
+[package]
+name = "vitals-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared models and serialization for vitals system monitoring"
+keywords = ["monitoring", "systemd", "journald", "health"]
+categories = ["data-structures"]
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time handling
+time.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+[lints]
+workspace = true
