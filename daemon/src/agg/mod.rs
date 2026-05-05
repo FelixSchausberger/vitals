@@ -14,6 +14,21 @@ use crate::{
     model::{Issue, Severity},
 };
 
+const BOOT_NOISE_PATTERNS: &[&str] = &[
+    "MDS CPU bug present",
+    "MMIO Stale Data CPU bug",
+    "VMSCAPE:",
+    "hpet_acpi_add:",
+    "ENERGY_PERF_BIAS:",
+    "spl: loading out-of-tree module taints kernel",
+    "device-mapper: core: CONFIG_IMA_DISABLE_HTABLE",
+    "zfs: module license",
+    "Disabling lock debugging due to kernel taint",
+    "NOTICE: Automounting of tracing to debugfs",
+    "x86/cpu: SGX disabled",
+    "spi-nor ",
+];
+
 /// Errors that can occur during issue aggregation.
 #[derive(Error, Debug)]
 #[allow(dead_code)]
@@ -99,8 +114,16 @@ pub fn aggregate_issues_with_config(
         }
     }
 
+    // Drop known one-time boot noise that is not actionable and otherwise
+    // dominates score impact after each reboot.
+    let filtered_entries: Vec<JournalEntry> = journal_entries
+        .iter()
+        .filter(|entry| !is_boot_noise(entry))
+        .cloned()
+        .collect();
+
     // Enhanced journal entry processing with better unit mapping
-    let grouped_entries = group_journal_entries_enhanced(journal_entries, &pid_to_unit_map);
+    let grouped_entries = group_journal_entries_enhanced(&filtered_entries, &pid_to_unit_map);
 
     // Process grouped entries using iteration patterns
     for ((priority, unit), entries) in grouped_entries {
@@ -186,7 +209,8 @@ fn group_journal_entries_enhanced<'a>(
         let mapped_unit = entry
             .unit
             .clone()
-            .or_else(|| entry.pid.and_then(|pid| pid_to_unit_map.get(&pid).cloned()));
+            .or_else(|| entry.pid.and_then(|pid| pid_to_unit_map.get(&pid).cloned()))
+            .or_else(|| infer_source_key_from_message(&entry.message));
 
         grouped
             .entry((entry.priority, mapped_unit))
@@ -195,6 +219,48 @@ fn group_journal_entries_enhanced<'a>(
     }
 
     grouped
+}
+
+/// Return true if this entry is a non-actionable one-time boot noise message.
+fn is_boot_noise(entry: &JournalEntry) -> bool {
+    if entry.unit.is_some() {
+        return false;
+    }
+
+    BOOT_NOISE_PATTERNS
+        .iter()
+        .any(|pattern| entry.message.contains(pattern))
+}
+
+/// Infer a stable source key from a journal message when unit/PID mapping is unavailable.
+///
+/// This improves issue attribution for kernel and subsystem warnings that don't include
+/// `_SYSTEMD_UNIT`, avoiding a single generic `unknown` bucket.
+fn infer_source_key_from_message(message: &str) -> Option<String> {
+    let source = message
+        .split_once(':')
+        .map(|(prefix, _)| prefix.trim())
+        .filter(|prefix| !prefix.is_empty())?;
+
+    let mut sanitized = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_' | '.' | '/') {
+            sanitized.push('-');
+        }
+    }
+
+    while sanitized.contains("--") {
+        sanitized = sanitized.replace("--", "-");
+    }
+
+    let key = sanitized.trim_matches('-');
+    if key.is_empty() {
+        return None;
+    }
+
+    Some(format!("source-{key}"))
 }
 
 /// Group journal entries by priority and unit for efficient processing.
@@ -353,6 +419,13 @@ fn are_issues_correlated(issue1: &Issue, issue2: &Issue, threshold: f64) -> bool
         return false;
     }
 
+    // Journal-derived buckets are already grouped by (priority, unit/source).
+    // Correlating them again creates oversized synthetic issues and over-penalizes
+    // bursts of unrelated warnings/errors.
+    if is_journal_issue(issue1) || is_journal_issue(issue2) {
+        return false;
+    }
+
     // Calculate various similarity scores
     let title_similarity = calculate_string_similarity(&issue1.title, &issue2.title);
     let summary_similarity = calculate_string_similarity(&issue1.summary, &issue2.summary);
@@ -366,6 +439,10 @@ fn are_issues_correlated(issue1: &Issue, issue2: &Issue, threshold: f64) -> bool
         + (time_similarity * 0.1);
 
     overall_similarity >= threshold
+}
+
+fn is_journal_issue(issue: &Issue) -> bool {
+    issue.id.starts_with("journal-") || issue.title.ends_with("Journal Events")
 }
 
 /// Calculate string similarity using a simple token-based approach.
@@ -796,7 +873,38 @@ mod tests {
 
         let issues = aggregate_issues_with_config(&entries, &[], &config);
 
-        // Should be correlated due to similar content and related unit names
+        // Journal buckets are already grouped; they should not be correlated again.
+        assert_eq!(issues.len(), 2);
+    }
+
+    #[test]
+    fn test_systemd_issues_can_still_correlate() {
+        let units = vec![
+            SystemdUnit {
+                name: "nginx.service".to_string(),
+                active_state: "failed".to_string(),
+                load_state: "loaded".to_string(),
+                sub_state: "failed".to_string(),
+                description: "Nginx web server".to_string(),
+                pids: vec![],
+            },
+            SystemdUnit {
+                name: "nginx.timer".to_string(),
+                active_state: "failed".to_string(),
+                load_state: "loaded".to_string(),
+                sub_state: "failed".to_string(),
+                description: "Nginx periodic task".to_string(),
+                pids: vec![],
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: true,
+            correlation_threshold: 0.5,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&[], &units, &config);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].title.contains("Correlated Issues"));
     }
@@ -896,5 +1004,76 @@ mod tests {
         let explicit_key = (3, Some("explicit.service".to_string()));
         assert!(grouped.contains_key(&explicit_key));
         assert_eq!(grouped.get(&explicit_key).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_unknown_unit_entries_grouped_by_inferred_source() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:00:00 UTC),
+                priority: 4,
+                message: "zfs: unknown parameter '#' ignored".to_string(),
+                unit: None,
+                pid: None,
+            },
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:01:00 UTC),
+                priority: 4,
+                message: "IPv4: martian destination 0.0.0.0 from 192.168.1.2".to_string(),
+                unit: None,
+                pid: None,
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert_eq!(issues.len(), 2);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.unit.as_deref() == Some("source-zfs")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.unit.as_deref() == Some("source-ipv4")));
+    }
+
+    #[test]
+    fn test_boot_noise_is_filtered_from_issues() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:00:00 UTC),
+                priority: 4,
+                message: "MDS CPU bug present and SMT on, data leak possible".to_string(),
+                unit: None,
+                pid: None,
+            },
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:01:00 UTC),
+                priority: 4,
+                message: "zfs: module license 'CDDL' taints kernel.".to_string(),
+                unit: None,
+                pid: None,
+            },
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:02:00 UTC),
+                priority: 4,
+                message: "service warning should remain".to_string(),
+                unit: Some("example.service".to_string()),
+                pid: Some(123),
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].unit.as_deref(), Some("example.service"));
+        assert_eq!(issues[0].count, 1);
     }
 }
