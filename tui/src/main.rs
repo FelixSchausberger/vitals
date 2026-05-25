@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -15,7 +15,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use vitals_core::api::HealthResponse;
+use vitals_core::{
+    addr::{resolve_daemon_addr, DaemonAddr},
+    api::HealthResponse,
+};
 
 mod client;
 mod ui;
@@ -27,13 +30,13 @@ use client::DaemonClient;
 #[command(name = "vitals-tui")]
 #[command(about = "Terminal UI for vitals system monitoring")]
 struct Args {
-    /// Daemon URL
-    #[arg(
-        long,
-        default_value = "http://localhost:8080",
-        help = "URL of the vitals daemon"
-    )]
-    daemon_url: String,
+    /// Daemon URL (TCP)
+    #[arg(long, help = "URL of the vitals daemon (e.g. http://localhost:8080)")]
+    daemon_url: Option<String>,
+
+    /// Daemon Unix socket path
+    #[arg(long, help = "Unix socket path of the vitals daemon")]
+    daemon_socket: Option<String>,
 
     /// Refresh interval in seconds
     #[arg(long, default_value = "2", help = "Refresh interval in seconds")]
@@ -49,8 +52,11 @@ async fn main() -> Result<()> {
         anyhow::bail!("vitals-tui requires a TTY. Use vitals-daemon for non-TTY output.");
     }
 
+    // Resolve daemon address
+    let addr = resolve_daemon_addr_from_args(&args);
+
     // Initialize daemon client
-    let client = DaemonClient::new(&args.daemon_url)?;
+    let client = DaemonClient::from_addr(addr);
 
     // Setup terminal
     enable_raw_mode()?;
@@ -76,6 +82,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_daemon_addr_from_args(args: &Args) -> DaemonAddr {
+    if let Some(ref path) = args.daemon_socket {
+        return DaemonAddr::Unix {
+            path: PathBuf::from(path),
+        };
+    }
+
+    if let Some(ref url) = args.daemon_url {
+        return DaemonAddr::Tcp {
+            url: url.trim_end_matches('/').to_string(),
+        };
+    }
+
+    resolve_daemon_addr()
 }
 
 async fn run_tui(
@@ -193,7 +215,7 @@ fn format_issues(data: &HealthResponse) -> Vec<Line<'_>> {
 
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:>3}×", issue.count),
+                format!("{:>3}\u{d7}", issue.count),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw(" "),

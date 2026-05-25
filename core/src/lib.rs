@@ -3,6 +3,7 @@
 //! This crate provides shared data structures for the vitals system monitoring suite,
 //! including models for issues, health metrics, and API responses.
 
+pub mod addr;
 pub mod api;
 pub mod health;
 pub mod issue;

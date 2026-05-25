@@ -1,14 +1,10 @@
-//! Vitals CLI — query the daemon and report system health.
-//!
-//! Output formats:
-//!   human    — readable one-liner (default)
-//!   ironbar  — waybar-compatible JSON for ironbar/waybar widgets
-//!   json     — raw daemon JSON pass-through
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
+use vitals_core::addr::{resolve_daemon_addr, DaemonAddr};
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
@@ -19,9 +15,13 @@ use serde_json::Value;
     version = "0.1.0"
 )]
 struct Args {
-    /// Daemon base URL
-    #[arg(long, env = "VITALS_URL", default_value = "http://127.0.0.1:8080")]
-    url: String,
+    /// Daemon base URL (TCP)
+    #[arg(long, env = "VITALS_URL")]
+    url: Option<String>,
+
+    /// Daemon Unix socket path
+    #[arg(long, env = "VITALS_SOCKET")]
+    socket: Option<String>,
 
     #[command(subcommand)]
     command: Cmd,
@@ -107,32 +107,28 @@ struct HistoryRecord {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let client = reqwest::Client::new();
+
+    let daemon_addr = resolve_daemon_addr_from_args(&args);
 
     match args.command {
         Cmd::Status { format } => {
-            let health = fetch_health(&client, &args.url).await?;
-            let history = fetch_history(&client, &args.url).await.ok();
+            let health = fetch_health(&daemon_addr).await?;
+            let history = fetch_history(&daemon_addr).await.ok();
             match format {
                 Format::Human => print_human(&health, history.as_ref()),
                 Format::Ironbar => print_ironbar(&health, history.as_ref()),
                 Format::Json => {
-                    let raw: Value = client
-                        .get(format!("{}/health", args.url))
-                        .send()
-                        .await?
-                        .json()
-                        .await?;
+                    let raw = fetch_json_value(&daemon_addr, "/health").await?;
                     println!("{}", serde_json::to_string_pretty(&raw)?);
                 }
             }
         }
         Cmd::Issues => {
-            let health = fetch_health(&client, &args.url).await?;
+            let health = fetch_health(&daemon_addr).await?;
             print_issues(&health);
         }
         Cmd::History => {
-            let history = fetch_history(&client, &args.url).await?;
+            let history = fetch_history(&daemon_addr).await?;
             print_history(&history);
         }
     }
@@ -140,28 +136,119 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// ── fetch helpers ─────────────────────────────────────────────────────────────
+fn resolve_daemon_addr_from_args(args: &Args) -> DaemonAddr {
+    // 1. CLI --socket flag
+    if let Some(ref path) = args.socket {
+        return DaemonAddr::Unix {
+            path: PathBuf::from(path),
+        };
+    }
 
-async fn fetch_health(client: &reqwest::Client, base: &str) -> Result<HealthResponse> {
-    client
-        .get(format!("{base}/health"))
-        .send()
-        .await
-        .context("Cannot reach daemon")?
-        .json::<HealthResponse>()
-        .await
-        .context("Failed to parse health response")
+    // 2. CLI --url flag
+    if let Some(ref url) = args.url {
+        if !url.is_empty() {
+            return DaemonAddr::Tcp { url: url.clone() };
+        }
+    }
+
+    // 3. Auto-detect via core (env vars, socket path, port file)
+    resolve_daemon_addr()
 }
 
-async fn fetch_history(client: &reqwest::Client, base: &str) -> Result<HistoryResponse> {
-    client
-        .get(format!("{base}/history"))
-        .send()
+// ── fetch helpers ─────────────────────────────────────────────────────────────
+
+async fn fetch_health(addr: &DaemonAddr) -> Result<HealthResponse> {
+    fetch_json(addr, "/health").await
+}
+
+async fn fetch_history(addr: &DaemonAddr) -> Result<HistoryResponse> {
+    fetch_json(addr, "/history").await
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    addr: &DaemonAddr,
+    endpoint: &str,
+) -> Result<T> {
+    match addr {
+        DaemonAddr::Unix { path } => {
+            let body = unix_http_get(path, endpoint).await?;
+            serde_json::from_slice(&body)
+                .with_context(|| format!("Failed to parse response from {endpoint}"))
+        }
+        DaemonAddr::Tcp { url } => {
+            let client = reqwest::Client::new();
+            client
+                .get(format!("{url}{endpoint}"))
+                .send()
+                .await
+                .context("Cannot reach daemon")?
+                .json::<T>()
+                .await
+                .with_context(|| format!("Failed to parse response from {endpoint}"))
+        }
+    }
+}
+
+async fn fetch_json_value(addr: &DaemonAddr, endpoint: &str) -> Result<Value> {
+    match addr {
+        DaemonAddr::Unix { path } => {
+            let body = unix_http_get(path, endpoint).await?;
+            serde_json::from_slice(&body)
+                .with_context(|| format!("Failed to parse response from {endpoint}"))
+        }
+        DaemonAddr::Tcp { url } => {
+            let client = reqwest::Client::new();
+            client
+                .get(format!("{url}{endpoint}"))
+                .send()
+                .await
+                .context("Cannot reach daemon")?
+                .json::<Value>()
+                .await
+                .with_context(|| format!("Failed to parse response from {endpoint}"))
+        }
+    }
+}
+
+/// Make an HTTP GET request over a Unix domain socket.
+async fn unix_http_get(socket_path: &std::path::Path, endpoint: &str) -> Result<Vec<u8>> {
+    use http_body_util::{BodyExt, Empty};
+    use hyper::{body::Bytes, Request};
+    use hyper_util::rt::TokioIo;
+
+    let stream = tokio::net::UnixStream::connect(socket_path)
         .await
-        .context("Cannot reach daemon")?
-        .json::<HistoryResponse>()
+        .with_context(|| format!("Failed to connect to daemon at {}", socket_path.display()))?;
+
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
-        .context("Failed to parse history response")
+        .context("HTTP handshake with daemon failed")?;
+
+    tokio::spawn(conn);
+
+    let request = Request::builder()
+        .uri(endpoint)
+        .header("Host", "localhost")
+        .body(Empty::<Bytes>::new())
+        .context("Failed to build HTTP request")?;
+
+    let response = sender
+        .send_request(request)
+        .await
+        .context("Failed to send request to daemon")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Daemon returned HTTP {}", response.status());
+    }
+
+    let collected = response
+        .into_body()
+        .collect()
+        .await
+        .context("Failed to read response body")?;
+
+    Ok(collected.to_bytes().to_vec())
 }
 
 // ── output formatters ─────────────────────────────────────────────────────────
@@ -186,21 +273,13 @@ fn print_human(h: &HealthResponse, history: Option<&HistoryResponse>) {
     }
 }
 
-/// Ironbar / waybar-compatible JSON widget output.
-///
-/// Schema:
-/// ```json
-/// { "text": "● 88.5", "tooltip": "<details>", "class": "good", "percentage": 88.5 }
-/// ```
 fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
     let class = status_class(&h.status);
     let icon = status_icon(h.score);
     let text = format!("{icon} {:.1}", h.score);
 
-    // Build tooltip: sparkline + change indicators + issue list
     let mut tooltip_lines: Vec<String> = Vec::new();
 
-    // Sparkline from history
     if let Some(hist) = history {
         if !hist.records.is_empty() {
             let sparkline = build_sparkline(&hist.records, 20);
@@ -223,7 +302,6 @@ fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
         }
     }
 
-    // Resource summary
     if let Some(ref res) = h.resources {
         tooltip_lines.push(format!(
             "CPU {:.1}%  Mem {:.1}%  Load {:.2}",
@@ -232,7 +310,6 @@ fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
         tooltip_lines.push(String::new());
     }
 
-    // Issues
     if h.issues.is_empty() {
         tooltip_lines.push("No active issues".to_string());
     } else {
@@ -250,12 +327,11 @@ fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
 
     let tooltip = tooltip_lines.join("\n");
 
-    // Escape for JSON string (newlines → \n literal is fine for waybar/ironbar)
     let out = serde_json::json!({
         "text": text,
         "tooltip": tooltip,
         "class": class,
-        "percentage": h.score,
+        "percentage": (h.score * 10.0).round() / 10.0,
     });
     println!("{out}");
 }
@@ -321,11 +397,9 @@ fn build_sparkline(records: &[HistoryRecord], width: usize) -> String {
         return String::new();
     }
 
-    // Downsample or use all records if fewer than width
     let samples: Vec<f64> = if records.len() <= width {
         records.iter().map(|r| r.score).collect()
     } else {
-        // Average bucket sampling
         let bucket = records.len() / width;
         (0..width)
             .map(|i| {
@@ -369,10 +443,10 @@ fn status_class(status: &str) -> &'static str {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn status_icon(score: f64) -> &'static str {
     match score as u32 {
-        90..=100 => "󰋑", // nerd font heart
-        75..=89 => "●",
-        50..=74 => "◕",
-        25..=49 => "◑",
-        _ => "○",
+        90..=100 => "\u{f0ed1}", // nerd font heart
+        75..=89 => "\u{25cf}",
+        50..=74 => "\u{25d5}",
+        25..=49 => "\u{25d1}",
+        _ => "\u{25cb}",
     }
 }

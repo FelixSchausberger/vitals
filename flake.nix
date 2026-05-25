@@ -33,11 +33,10 @@
       ];
 
       perSystem =
-        {
-          config,
-          pkgs,
-          system,
-          ...
+        { config
+        , pkgs
+        , system
+        , ...
         }:
         let
           # Apply rust-overlay to pkgs
@@ -334,7 +333,10 @@
             projectRootFile = "flake.nix";
             programs = {
               nixpkgs-fmt.enable = true;
-              rustfmt.enable = true;
+              rustfmt = {
+                enable = true;
+                package = pkgs.rustfmt;
+              };
             };
           };
         };

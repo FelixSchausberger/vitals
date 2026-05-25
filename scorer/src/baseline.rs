@@ -92,13 +92,13 @@ impl SystemProfile {
             if let Ok(chassis_type) = chassis_raw.trim().parse::<u8>() {
                 return match chassis_type {
                     // Server chassis types (SMBIOS spec 3.x, Table 23)
-                    17 | 23 | 28 | 29 => Self::Server,
+                    17 | 23 | 28 | 29 | 36 => Self::Server,
                     // Desktop
-                    3 | 4 | 5 | 6 | 7 | 13 => Self::Desktop,
+                    3 | 4 | 5 | 6 | 7 | 13 | 35 => Self::Desktop,
                     // Laptop / mobile
                     8 | 9 | 10 | 11 | 14 | 30 | 31 | 32 => Self::Laptop,
-                    // Embedded / IoT / mini
-                    33..=36 => Self::Embedded,
+                    // Embedded / IoT / mini (33 = Embedded PC, 34 = Diskette drive)
+                    33 | 34 => Self::Embedded,
                     _ => Self::Unknown,
                 };
             }

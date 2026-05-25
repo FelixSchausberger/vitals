@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use clap::Parser;
-use scorer::ResourceBaseline;
+use scorer::{baseline::SystemProfile, ResourceBaseline};
 use serde_json::{json, Value};
 use time::OffsetDateTime;
 use tokio::time::interval;
@@ -176,7 +176,10 @@ async fn run_once(config: &Config, args: &Args) -> Result<()> {
     } = data;
 
     // Calculate health
-    let mut calculator = TwhsCalculator::new(config.twhs.clone(), ResourceBaseline::new());
+    let mut calculator = TwhsCalculator::new(
+        config.twhs.clone(),
+        ResourceBaseline::from_system_profile(SystemProfile::detect(), 300),
+    );
     let breakdown = calculator.compute(&issues, system_metrics.as_ref(), unit_metrics.as_deref());
 
     // Output based on format
@@ -418,20 +421,136 @@ async fn run_daemon(config: Config, args: Args) -> Result<()> {
     // Create HTTP server
     let app = create_app(state.clone());
 
-    // Start server
-    let addr = format!("{}:{}", config.daemon.host, config.daemon.port);
-    println!("Vitals daemon listening on {addr}");
-    println!("  Health endpoint: http://{addr}/health");
-    println!("  Metrics endpoint: http://{addr}/metrics");
+    // Try Unix socket first, fall back to TCP with port fallback
+    match bind_unix_socket(&app).await {
+        Ok(()) => Ok(()),
+        Err(_) => bind_tcp_with_fallback(&app, &config).await,
+    }
+}
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("Failed to bind to {addr}"))?;
+/// Bind to a Unix domain socket (primary transport).
+async fn bind_unix_socket(app: &Router) -> Result<()> {
+    let socket_path = vitals_core::addr::daemon_socket_path();
 
-    axum::serve(listener, app)
-        .await
-        .context("HTTP server failed")?;
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| "Failed to create socket directory")?;
+    }
 
+    let _ = std::fs::remove_file(&socket_path);
+
+    let listener = tokio::net::UnixListener::bind(&socket_path)
+        .with_context(|| format!("Failed to bind Unix socket at {}", socket_path.display()))?;
+
+    println!(
+        "Vitals daemon listening on Unix socket: {}",
+        socket_path.display()
+    );
+
+    vitals_core::addr::write_addr_file(&vitals_core::addr::DaemonAddr::Unix { path: socket_path });
+
+    // Also try to serve on TCP for backward compatibility
+    let tcp_app = app.clone();
+    let tcp_config = tcp_app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = try_bind_tcp_background(&tcp_config, 8080).await {
+            eprintln!("Optional TCP listener failed (non-fatal): {e}");
+        }
+    });
+
+    serve_unix_socket(listener, app.clone()).await
+}
+
+/// Try to bind TCP in the background (optional, backward compatibility).
+async fn try_bind_tcp_background(app: &Router, start_port: u16) -> Result<()> {
+    for port in start_port..=start_port + 10 {
+        let addr = format!("127.0.0.1:{port}");
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                println!("  Also listening on TCP: http://{addr}/health");
+                axum::serve(listener, app.clone())
+                    .await
+                    .context("TCP server failed")?;
+                return Ok(());
+            }
+            Err(_) if port < start_port + 10 => (),
+            Err(e) => {
+                anyhow::bail!(
+                    "Failed to bind TCP after trying ports {start_port}-{}: {e}",
+                    start_port + 10
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Accept connections on a Unix socket and serve the axum app.
+async fn serve_unix_socket(listener: tokio::net::UnixListener, app: Router) -> Result<()> {
+    use http_body_util::BodyExt;
+    use hyper::{body::Incoming, server::conn::http1};
+    use hyper_util::rt::TokioIo;
+    use tower::Service;
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+
+            let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                let mut app = app.clone();
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let boxed = BodyExt::map_err(body, |e| {
+                        let err: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+                        err
+                    })
+                    .boxed_unsync();
+                    let axum_req = hyper::Request::from_parts(parts, boxed);
+                    let response = app.call(axum_req).await.unwrap();
+                    Ok::<_, anyhow::Error>(response)
+                }
+            });
+
+            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                eprintln!("Unix socket connection error: {e}");
+            }
+        });
+    }
+}
+
+/// Bind to TCP with port fallback (primary fallback transport).
+async fn bind_tcp_with_fallback(app: &Router, config: &Config) -> Result<()> {
+    let start_port = config.daemon.port;
+    for port in start_port..=start_port + 10 {
+        let addr = format!("{}:{}", config.daemon.host, port);
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                println!("Vitals daemon listening on {addr}");
+                println!("  Health endpoint: http://{addr}/health");
+                println!("  Metrics endpoint: http://{addr}/metrics");
+
+                vitals_core::addr::write_addr_file(&vitals_core::addr::DaemonAddr::Tcp {
+                    url: format!("http://{addr}"),
+                });
+
+                axum::serve(listener, app.clone())
+                    .await
+                    .context("HTTP server failed")?;
+                return Ok(());
+            }
+            Err(_) if port < start_port + 10 => {
+                eprintln!("Port {port} in use, trying {next}", next = port + 1);
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Failed to bind TCP after trying ports {start_port}-{}: {e}",
+                    start_port + 10
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -446,6 +565,10 @@ fn create_app(state: AppState) -> Router {
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+fn round1(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
 }
 
 /// Root endpoint handler
@@ -486,9 +609,9 @@ async fn score_handler(State(state): State<AppState>) -> Result<Json<Value>, Sta
     let delta_1h = history.change_over_period(3600, score, now_ts);
 
     Ok(Json(json!({
-        "score": score,
+        "score": round1(score),
         "status": status,
-        "delta_1h": delta_1h,
+        "delta_1h": delta_1h.map(round1),
     })))
 }
 
@@ -501,14 +624,14 @@ async fn history_handler(State(state): State<AppState>) -> Result<Json<Value>, S
     let records: Vec<Value> = history
         .all_records()
         .iter()
-        .map(|r| json!({"timestamp": r.timestamp, "score": r.score}))
+        .map(|r| json!({"timestamp": r.timestamp, "score": round1(r.score)}))
         .collect();
     let now_ts = OffsetDateTime::now_utc().unix_timestamp();
     Ok(Json(json!({
         "records": records,
-        "change_1h":  history.change_over_period(3600,      history.all_records().back().map_or(0.0, |r| r.score), now_ts),
-        "change_24h": history.change_over_period(86400,     history.all_records().back().map_or(0.0, |r| r.score), now_ts),
-        "change_7d":  history.change_over_period(7 * 86400, history.all_records().back().map_or(0.0, |r| r.score), now_ts),
+        "change_1h":  history.change_over_period(3600,      history.all_records().back().map_or(0.0, |r| r.score), now_ts).map(round1),
+        "change_24h": history.change_over_period(86400,     history.all_records().back().map_or(0.0, |r| r.score), now_ts).map(round1),
+        "change_7d":  history.change_over_period(7 * 86400, history.all_records().back().map_or(0.0, |r| r.score), now_ts).map(round1),
     })))
 }
 
@@ -530,8 +653,8 @@ async fn health_handler(State(state): State<AppState>) -> Result<Json<Value>, St
         |breakdown| {
             let mut response = json!({
                 "status": score_to_status(breakdown.smoothed_score),
-                "score": breakdown.smoothed_score,
-                "raw_score": breakdown.overall_score,
+                "score": round1(breakdown.smoothed_score),
+                "raw_score": round1(breakdown.overall_score),
                 "heartbeat": score_to_heartbeat_color(breakdown.smoothed_score),
                 "timestamp": breakdown.timestamp.unix_timestamp(),
                 "breakdown": {
@@ -718,7 +841,10 @@ async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Re
         metrics_sysinfo::SysinfoMetricsReader, systemd_zbus::ZbusSystemdReader,
     };
 
-    let mut calculator = TwhsCalculator::new(state.config.twhs.clone(), ResourceBaseline::new());
+    let mut calculator = TwhsCalculator::new(
+        state.config.twhs.clone(),
+        ResourceBaseline::from_system_profile(SystemProfile::detect(), 300),
+    );
     let mut probe_state = ProbeState::new();
     let mut tick_interval = interval(Duration::from_secs(
         state.config.daemon.calculation_interval,

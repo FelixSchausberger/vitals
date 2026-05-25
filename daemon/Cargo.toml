@@ -57,6 +57,11 @@ axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
 
+# HTTP for Unix socket serving
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+
 # Configuration
 toml = { version = "0.8", features = ["preserve_order"] }
 dirs = "5.0"

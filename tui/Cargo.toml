@@ -31,6 +31,11 @@ reqwest = { version = "0.12", features = [
 # Async runtime
 tokio.workspace = true
 
+# HTTP for Unix socket client
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

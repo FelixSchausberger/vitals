@@ -2767,11 +2767,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "serde",
  "serde_json",
  "time",
  "tokio",
+ "vitals-core",
 ]
 
 [[package]]
@@ -2792,6 +2796,9 @@ dependencies = [
  "axum",
  "clap",
  "dirs",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "log",
  "num_cpus",
  "procfs",
@@ -2824,6 +2831,9 @@ dependencies = [
  "atty",
  "clap",
  "crossterm",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ratatui",
  "reqwest",
  "serde",

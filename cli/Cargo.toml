@@ -15,6 +15,9 @@ name = "vitals"
 path = "src/main.rs"
 
 [dependencies]
+# Shared core models
+vitals-core = { path = "../core" }
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
@@ -35,7 +38,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 
 # Async runtime
-tokio = { workspace = true }
+tokio.workspace = true
+
+# HTTP for Unix socket client
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
 
 [lints]
 workspace = true
