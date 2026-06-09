@@ -35,18 +35,26 @@ pub struct HealthBreakdown {
 pub struct ResourceHealthMetrics {
     /// Current CPU usage percentage
     pub cpu_usage: f64,
+    /// CPU contribution to resource burden (positive value)
+    pub cpu_penalty: f64,
     /// CPU usage health status
     pub cpu_status: ResourceStatus,
     /// Current memory usage percentage
     pub memory_usage: f64,
+    /// Memory contribution to resource burden (positive value)
+    pub memory_penalty: f64,
     /// Memory usage health status
     pub memory_status: ResourceStatus,
     /// Current disk usage percentage
     pub disk_usage: f64,
+    /// Disk contribution to resource burden (positive value)
+    pub disk_penalty: f64,
     /// Disk usage health status
     pub disk_status: ResourceStatus,
     /// Current load average
     pub load_average: f64,
+    /// Load contribution to resource burden (positive value)
+    pub load_penalty: f64,
     /// Load average health status
     pub load_status: ResourceStatus,
     /// Total resource impact on health score (negative value)

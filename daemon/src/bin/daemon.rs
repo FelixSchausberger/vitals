@@ -676,12 +676,16 @@ async fn health_handler(State(state): State<AppState>) -> Result<Json<Value>, St
             if let Some(ref resource_metrics) = breakdown.resource_metrics {
                 response["resources"] = json!({
                     "cpu_usage": resource_metrics.cpu_usage,
+                    "cpu_penalty": resource_metrics.cpu_penalty,
                     "cpu_status": resource_metrics.cpu_status,
                     "memory_usage": resource_metrics.memory_usage,
+                    "memory_penalty": resource_metrics.memory_penalty,
                     "memory_status": resource_metrics.memory_status,
                     "disk_usage": resource_metrics.disk_usage,
+                    "disk_penalty": resource_metrics.disk_penalty,
                     "disk_status": resource_metrics.disk_status,
                     "load_average": resource_metrics.load_average,
+                    "load_penalty": resource_metrics.load_penalty,
                     "load_status": resource_metrics.load_status,
                     "resource_impact": resource_metrics.resource_impact,
                     "resource_hog_count": resource_metrics.resource_hog_count,

@@ -52,8 +52,6 @@ enum Format {
 #[derive(Debug, Deserialize)]
 struct HealthResponse {
     score: f64,
-    #[serde(default)]
-    raw_score: f64,
     status: String,
     #[serde(default)]
     breakdown: Breakdown,
@@ -83,8 +81,20 @@ struct IssueImpact {
 #[derive(Debug, Deserialize)]
 struct Resources {
     cpu_usage: f64,
+    #[serde(default)]
+    cpu_penalty: f64,
     memory_usage: f64,
+    #[serde(default)]
+    memory_penalty: f64,
+    #[serde(default)]
+    disk_usage: f64,
+    #[serde(default)]
+    disk_penalty: f64,
     load_average: f64,
+    #[serde(default)]
+    load_penalty: f64,
+    #[serde(default)]
+    resource_impact: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,7 +135,8 @@ async fn main() -> Result<()> {
         }
         Cmd::Issues => {
             let health = fetch_health(&daemon_addr).await?;
-            print_issues(&health);
+            let history = fetch_history(&daemon_addr).await.ok();
+            print_issues(&health, history.as_ref());
         }
         Cmd::History => {
             let history = fetch_history(&daemon_addr).await?;
@@ -336,31 +347,70 @@ fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
     println!("{out}");
 }
 
-fn print_issues(h: &HealthResponse) {
+fn print_issues(h: &HealthResponse, history: Option<&HistoryResponse>) {
     if h.issues.is_empty() {
         println!("No active issues.");
-        return;
-    }
-    println!(
-        "{:<10}  {:<6}  {:<50}  IMPACT",
-        "SEVERITY", "COUNT", "TITLE"
-    );
-    println!("{}", "-".repeat(80));
-    for issue in &h.issues {
+    } else {
         println!(
-            "{:<10}  {:<6}  {:<50}  -{:.2}",
-            issue.severity.to_uppercase(),
-            issue.count,
-            issue.title,
-            issue.impact
+            "{:<10}  {:<6}  {:<50}  BURDEN",
+            "SEVERITY", "COUNT", "TITLE"
         );
+        println!("{}", "-".repeat(80));
+        for issue in &h.issues {
+            let burden = issue.impact.abs();
+            let burden_text = if burden < 0.005 {
+                "<0.01".to_string()
+            } else {
+                format!("{burden:.2}")
+            };
+            println!(
+                "{:<10}  {:<6}  {:<50}  {:>6}",
+                issue.severity.to_uppercase(),
+                issue.count,
+                issue.title,
+                burden_text
+            );
+        }
     }
+
+    if let Some(ref res) = h.resources {
+        println!();
+        println!("Resources:");
+
+        let mut printed_dimension = false;
+        for (name, usage, penalty, suffix) in [
+            ("CPU", res.cpu_usage, res.cpu_penalty, "%"),
+            ("MEM", res.memory_usage, res.memory_penalty, "%"),
+            ("DISK", res.disk_usage, res.disk_penalty, "%"),
+            ("LOAD", res.load_average, res.load_penalty, ""),
+        ] {
+            if penalty > 0.3 {
+                printed_dimension = true;
+                let left = if suffix.is_empty() {
+                    format!("{name:<4}  {usage:>5.2}")
+                } else {
+                    format!("{name:<4}  {usage:>5.1}{suffix}")
+                };
+                println!("  {left:<26} burden {penalty:>6.2}");
+            }
+        }
+
+        if !printed_dimension {
+            println!("  No elevated resource dimensions.");
+        }
+        println!("  Total resource burden: {:.2}", res.resource_impact.abs());
+    }
+
     println!();
-    let total: f64 = h.issues.iter().map(|i| i.impact).sum();
-    println!(
-        "Raw score: {:.1}  Smoothed: {:.1}  Total burden: {:.2}",
-        h.raw_score, h.score, total
-    );
+    let trend_24h = history
+        .and_then(|hist| hist.change_24h)
+        .map(|d| format!("  24h: {d:+.1}"))
+        .unwrap_or_default();
+    println!("Score: {:.1}{}", h.score, trend_24h);
+    if let Some(hist) = history.filter(|hist| !hist.records.is_empty()) {
+        let sparkline = build_sparkline(&hist.records, 32);
+        println!("  {sparkline}  (7-day history)");
+    }
 }
 
 fn print_history(hist: &HistoryResponse) {

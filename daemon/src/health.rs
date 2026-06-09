@@ -110,15 +110,19 @@ impl TwhsCalculator {
                 .as_ref()
                 .map(|rc| ResourceHealthMetrics {
                     cpu_usage: snap.cpu_usage,
+                    cpu_penalty: rc.cpu_penalty,
                     cpu_status: penalty_to_status(rc.cpu_penalty, self.config.resources.r_max),
                     memory_usage: snap.memory_usage,
+                    memory_penalty: rc.memory_penalty,
                     memory_status: penalty_to_status(
                         rc.memory_penalty,
                         self.config.resources.r_max,
                     ),
                     disk_usage: snap.disk_usage,
+                    disk_penalty: rc.disk_penalty,
                     disk_status: penalty_to_status(rc.disk_penalty, self.config.resources.r_max),
                     load_average: snap.load_average,
+                    load_penalty: rc.load_penalty,
                     load_status: penalty_to_status(rc.load_penalty, self.config.resources.r_max),
                     resource_impact: -rc.total,
                     resource_hog_count: 0,
