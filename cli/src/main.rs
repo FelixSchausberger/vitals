@@ -70,31 +70,38 @@ struct Breakdown {
     info: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct IssueImpact {
     title: String,
     severity: String,
     count: usize,
     impact: f64,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    hints: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct Resources {
     cpu_usage: f64,
-    #[serde(default)]
     cpu_penalty: f64,
     memory_usage: f64,
-    #[serde(default)]
     memory_penalty: f64,
-    #[serde(default)]
     disk_usage: f64,
-    #[serde(default)]
     disk_penalty: f64,
     load_average: f64,
-    #[serde(default)]
     load_penalty: f64,
     #[serde(default)]
     resource_impact: f64,
+    #[serde(default)]
+    baseline_learning_mode: bool,
+    #[serde(default)]
+    baseline_samples: u64,
+    #[serde(default)]
+    min_samples_for_baseline: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,11 +356,11 @@ fn print_ironbar(h: &HealthResponse, history: Option<&HistoryResponse>) {
 
 fn print_issues(h: &HealthResponse, history: Option<&HistoryResponse>) {
     if h.issues.is_empty() {
-        println!("No active issues.");
+        println!("No active issues.\n");
     } else {
         println!(
-            "{:<10}  {:<6}  {:<50}  BURDEN",
-            "SEVERITY", "COUNT", "TITLE"
+            "{:<10}  {:>5}  {:<50}  {:>7}",
+            "SEVERITY", "COUNT", "TITLE", "BURDEN"
         );
         println!("{}", "-".repeat(80));
         for issue in &h.issues {
@@ -364,49 +371,60 @@ fn print_issues(h: &HealthResponse, history: Option<&HistoryResponse>) {
                 format!("{burden:.2}")
             };
             println!(
-                "{:<10}  {:<6}  {:<50}  {:>6}",
+                "{:<10}  {:>5}  {:<50}  {:>7}",
                 issue.severity.to_uppercase(),
                 issue.count,
                 issue.title,
                 burden_text
             );
+            if let Some(hint) = issue.hints.first() {
+                println!("  {hint:>67}");
+            }
         }
     }
 
     if let Some(ref res) = h.resources {
-        println!();
-        println!("Resources:");
-
-        let mut printed_dimension = false;
-        for (name, usage, penalty, suffix) in [
-            ("CPU", res.cpu_usage, res.cpu_penalty, "%"),
-            ("MEM", res.memory_usage, res.memory_penalty, "%"),
-            ("DISK", res.disk_usage, res.disk_penalty, "%"),
-            ("LOAD", res.load_average, res.load_penalty, ""),
-        ] {
-            if penalty > 0.3 {
-                printed_dimension = true;
-                let left = if suffix.is_empty() {
-                    format!("{name:<4}  {usage:>5.2}")
-                } else {
-                    format!("{name:<4}  {usage:>5.1}{suffix}")
-                };
-                println!("  {left:<26} burden {penalty:>6.2}");
-            }
+        let resource_str = format!(
+            "CPU {:.1}%  MEM {:.1}%  DISK {:.1}%  LOAD {:.2}",
+            res.cpu_usage, res.memory_usage, res.disk_usage, res.load_average
+        );
+        let burden = res.resource_impact.abs();
+        if h.issues.is_empty() {
+            println!("{:<10}  {:>5}  {:<50}  {:>7}", "", "", "", "");
         }
-
-        if !printed_dimension {
-            println!("  No elevated resource dimensions.");
+        println!(
+            "{:<10}  {:>5}  {:<50}  {:>7}",
+            "",
+            "",
+            resource_str,
+            format!("{burden:.2}")
+        );
+        let mut baseline_info = String::new();
+        if res.baseline_learning_mode {
+            baseline_info = format!(
+                "  [baseline: {}/{} learning]",
+                res.baseline_samples, res.min_samples_for_baseline
+            );
+        } else if res.baseline_samples > 0 {
+            baseline_info = format!("  [baseline: {} samples]", res.baseline_samples);
         }
-        println!("  Total resource burden: {:.2}", res.resource_impact.abs());
+        if !baseline_info.is_empty() {
+            println!("{baseline_info:>81}");
+        }
     }
 
     println!();
-    let trend_24h = history
-        .and_then(|hist| hist.change_24h)
-        .map(|d| format!("  24h: {d:+.1}"))
+    let change = history.and_then(|hist| hist.change_24h);
+    let trend_arrow = match change {
+        Some(d) if d > 1.0 => "↗",
+        Some(d) if d < -1.0 => "↘",
+        Some(_) => "→",
+        None => "",
+    };
+    let trend_text = change
+        .map(|d| format!("  ({d:+.1} 24h)"))
         .unwrap_or_default();
-    println!("Score: {:.1}{}", h.score, trend_24h);
+    println!("Score {} {:.1}{}", trend_arrow, h.score, trend_text);
     if let Some(hist) = history.filter(|hist| !hist.records.is_empty()) {
         let sparkline = build_sparkline(&hist.records, 32);
         println!("  {sparkline}  (7-day history)");

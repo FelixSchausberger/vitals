@@ -324,7 +324,9 @@ fn output_json(breakdown: &HealthBreakdown) {
             "title": impact.title,
             "severity": impact.severity,
             "count": impact.count,
-            "impact": impact.impact
+            "impact": impact.impact,
+            "unit": impact.unit,
+            "hints": impact.hints
         })).collect::<Vec<_>>(),
         "resources": breakdown.resource_metrics.as_ref().map(|rm| json!({
             "cpu_usage": rm.cpu_usage,
@@ -341,7 +343,10 @@ fn output_json(breakdown: &HealthBreakdown) {
                 "cpu_usage": c.cpu_usage,
                 "memory_mb": c.memory_mb,
                 "impact_score": c.impact_score
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "baseline_learning_mode": rm.baseline_learning_mode,
+            "baseline_samples": rm.baseline_samples,
+            "min_samples_for_baseline": rm.min_samples_for_baseline
         }))
     });
 
@@ -668,7 +673,9 @@ async fn health_handler(State(state): State<AppState>) -> Result<Json<Value>, St
                     "title": impact.title,
                     "severity": impact.severity,
                     "count": impact.count,
-                    "impact": impact.impact
+                    "impact": impact.impact,
+                    "unit": impact.unit,
+                    "hints": impact.hints
                 })).collect::<Vec<_>>()
             });
 
@@ -694,7 +701,10 @@ async fn health_handler(State(state): State<AppState>) -> Result<Json<Value>, St
                         "cpu_usage": consumer.cpu_usage,
                         "memory_mb": consumer.memory_mb,
                         "impact_score": consumer.impact_score
-                    })).collect::<Vec<_>>()
+                    })).collect::<Vec<_>>(),
+                    "baseline_learning_mode": resource_metrics.baseline_learning_mode,
+                    "baseline_samples": resource_metrics.baseline_samples,
+                    "min_samples_for_baseline": resource_metrics.min_samples_for_baseline
                 });
             }
 

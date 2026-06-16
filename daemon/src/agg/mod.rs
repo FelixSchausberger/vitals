@@ -305,7 +305,10 @@ fn create_journal_issue(
     };
 
     let id = generate_issue_id(priority, unit, severity);
-    let title = format!("{severity} Journal Events");
+    let title = match unit {
+        Some(u) => format!("{severity} Journal Events — {u}"),
+        None => format!("{severity} Journal Events"),
+    };
     let summary = format!(
         "Grouped {} {} journal entries",
         entries.len(),

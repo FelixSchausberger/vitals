@@ -250,38 +250,25 @@
               alias watch:daemon='cargo watch -x "run --bin vitals-daemon"'
               alias watch:tui='cargo watch -x "run --bin vitals-tui"'
 
-              echo "🩺 Vitals Cargo Workspace - Development Environment"
-              echo ""
-              echo "📦 Workspace Structure:"
-              echo "  core/   - Shared data models and types"
-              echo "  daemon/ - Backend daemon with HTTP API"
-              echo "  tui/    - Terminal UI client"
-              echo ""
-              echo "🚀 Quick Start:"
-              echo "  run:daemon  - Start daemon on :8080"
-              echo "  run:tui     - Start TUI (connects to daemon)"
-              echo ""
-              echo "🧪 Testing:"
-              echo "  test        - Run all workspace tests"
-              echo "  test:daemon - Test daemon only"
-              echo "  test:tui    - Test TUI only"
-              echo "  test:core   - Test core only"
-              echo ""
-              echo "🛠️  Development:"
-              echo "  format      - Format all code with rustfmt"
-              echo "  lint        - Run clippy on workspace"
-              echo "  watch:daemon - Watch and auto-restart daemon"
-              echo "  watch:tui    - Watch and auto-restart TUI"
-              echo ""
-              echo "📦 Build with Nix:"
-              echo "  build        - Build both daemon and TUI"
-              echo "  build:daemon - Build daemon only"
-              echo "  build:tui    - Build TUI only"
-              echo "  treefmt      - Format code (Nix treefmt)"
-              echo ""
-              echo "📝 Systemd Installation:"
-              echo "  sudo ./daemon/scripts/install-daemon.sh"
-              echo "  ./daemon/scripts/diagnose-daemon.sh"
+              # Defer welcome message to first interactive prompt so it never
+              # contaminates the output of e.g. `nix develop -c vitals --help`.
+              if [ -z "$_VITALS_WELCOME" ]; then
+                export _VITALS_WELCOME=1
+                _prompt_vitals() {
+                  echo "🩺 Vitals Cargo Workspace — Development Environment"
+                  echo ""
+                  echo "  run:daemon   Start daemon on :8080"
+                  echo "  run:tui      Start TUI (connects to daemon)"
+                  echo "  test         Run all workspace tests"
+                  echo "  build        Build both daemon and TUI"
+                  echo "  lint         Run clippy on workspace"
+                  echo ""
+                  echo "  treefmt      Format code (Nix treefmt)"
+                  PROMPT_COMMAND="$(echo "$PROMPT_COMMAND" | sed 's/_prompt_vitals;//g; s/;*$//')"
+                  unset -f _prompt_vitals
+                }
+                PROMPT_COMMAND="_prompt_vitals;''${PROMPT_COMMAND:-:}"
+              fi
             '';
 
             buildInputs =
@@ -335,7 +322,8 @@
               nixpkgs-fmt.enable = true;
               rustfmt = {
                 enable = true;
-                package = pkgs.rustfmt;
+                edition = "2021";
+                package = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.rustfmt);
               };
             };
           };

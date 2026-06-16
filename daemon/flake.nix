@@ -10,8 +10,15 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    { self
+    , nixpkgs
+    , flake-utils
+    , rust-overlay
+    ,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
@@ -20,7 +27,10 @@
 
         # Use stable Rust
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+          ];
         };
 
         # System libraries needed for compilation
@@ -58,7 +68,7 @@
             src = ./.;
 
             cargoLock = {
-              lockFile = ./Cargo.lock;
+              lockFile = ../Cargo.lock;
             };
 
             nativeBuildInputs = nativeBuildInputs;

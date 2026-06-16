@@ -94,12 +94,17 @@ impl TwhsCalculator {
         let issue_impacts: Vec<IssueImpact> = scorer_result
             .contributions
             .iter()
-            .map(|c| IssueImpact {
-                id: c.id.clone(),
-                title: c.title.clone(),
-                severity: twhs_severity_to_core(c.severity),
-                count: count_by_id.get(&c.id).copied().unwrap_or(1),
-                impact: -c.adjusted_penalty,
+            .map(|c| {
+                let original = issues.iter().find(|i| i.id == c.id);
+                IssueImpact {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    severity: twhs_severity_to_core(c.severity),
+                    count: count_by_id.get(&c.id).copied().unwrap_or(1),
+                    impact: -c.adjusted_penalty,
+                    unit: original.and_then(|i| i.unit.clone()),
+                    hints: original.map_or(vec![], |i| i.hints.clone()),
+                }
             })
             .collect();
 
@@ -127,6 +132,9 @@ impl TwhsCalculator {
                     resource_impact: -rc.total,
                     resource_hog_count: 0,
                     top_resource_consumers: vec![],
+                    baseline_learning_mode: scorer_result.baseline_learning_mode,
+                    baseline_samples: self.baseline.sample_count,
+                    min_samples_for_baseline: self.config.resources.min_samples_for_baseline,
                 })
         });
 

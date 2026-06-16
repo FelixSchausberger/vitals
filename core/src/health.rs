@@ -63,6 +63,15 @@ pub struct ResourceHealthMetrics {
     pub resource_hog_count: usize,
     /// Top resource-consuming units
     pub top_resource_consumers: Vec<ResourceConsumer>,
+    /// True during the baseline learning period (first N samples)
+    #[serde(default)]
+    pub baseline_learning_mode: bool,
+    /// Number of samples collected in the resource baseline
+    #[serde(default)]
+    pub baseline_samples: u64,
+    /// Samples needed before baseline is considered reliable
+    #[serde(default)]
+    pub min_samples_for_baseline: u64,
 }
 
 /// Resource health status levels
@@ -112,4 +121,10 @@ pub struct IssueImpact {
     pub count: usize,
     /// Score impact (negative value)
     pub impact: f64,
+    /// Associated systemd unit, if applicable
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Actionable hints for resolving the issue
+    #[serde(default)]
+    pub hints: Vec<String>,
 }
