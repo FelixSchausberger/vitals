@@ -15,7 +15,10 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    # 26.05 (not unstable): unstable's 26.11 dropped x86_64-darwin, which this
+    # flake exposes, while 26.05 also ships a cargo-audit that can parse
+    # CVSS v4.0 entries in the RustSec advisory DB.
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
     flake-parts.url = "github:hercules-ci/flake-parts";
     systems.url = "github:nix-systems/default";
     rust-overlay.url = "github:oxalica/rust-overlay";
