@@ -42,6 +42,13 @@ jobs:
         if: always() && github.event_name != 'pull_request' && github.token != ''
         with:
           sarif_file: "trivy-results.sarif"
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            ${{ env.NIX_CONFIG }}
+      - name: Cache Nix store
+        uses: DeterminateSystems/flakehub-cache-action@v3
       - name: Run cargo audit
         run: |
           nix develop --command cargo audit --deny warnings

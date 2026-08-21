@@ -285,6 +285,7 @@
                 rust-analyzer
                 cargo-watch
                 cargo-edit
+                cargo-audit
 
                 # Development and build tools
                 pkg-config
