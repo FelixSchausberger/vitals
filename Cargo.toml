@@ -21,7 +21,7 @@ time = { version = "0.3.36", features = [
   "parsing",
   "macros",
 ] }
-scorer = { path = "scorer" }
+scorer = { path = "scorer", version = "0.1.0" }
 thiserror = "1.0.69"
 anyhow = { version = "1.0.92", features = ["backtrace"] }
 tokio = { version = "1.41", features = [

@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../README.md"
 description = "Shared models and serialization for vitals system monitoring"
 keywords = ["monitoring", "systemd", "journald", "health"]
 categories = ["data-structures"]

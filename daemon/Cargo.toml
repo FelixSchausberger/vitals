@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../README.md"
 description = "Lightweight system health monitoring daemon with journald and systemd integration"
 keywords = ["daemon", "monitoring", "systemd", "journald", "health"]
 categories = ["command-line-utilities"]
@@ -14,9 +15,14 @@ categories = ["command-line-utilities"]
 name = "vitals-daemon"
 path = "src/bin/daemon.rs"
 
+[features]
+default = ["systemd"]
+# journald + systemd D-Bus integration; disable for non-systemd systems
+systemd = ["dep:zbus", "dep:systemd"]
+
 [dependencies]
 # Shared core models
-vitals-core = { path = "../core" }
+vitals-core = { path = "../core", version = "0.1.0" }
 
 # Scorer algorithm
 scorer.workspace = true
@@ -46,11 +52,13 @@ time.workspace = true
 regex = "1.10"
 
 # System integration
-zbus = "5.1"
-systemd = { version = "0.10", default-features = false, features = ["journal"] }
-sysinfo = "0.32"
+zbus = { version = "5.1", optional = true }
+systemd = { version = "0.10", default-features = false, features = [
+  "journal",
+], optional = true }
 procfs = "0.17"
 num_cpus = "1.16"
+nix = { version = "0.29", default-features = false, features = ["fs"] }
 
 # Web server for daemon HTTP API
 axum = "0.7"

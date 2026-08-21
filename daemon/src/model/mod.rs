@@ -63,9 +63,10 @@ impl TimeFilter {
                 #[cfg(not(test))]
                 {
                     // Get actual system boot time
-                    use sysinfo::System;
-                    let uptime_secs = System::uptime();
-                    Some(now - time::Duration::seconds(uptime_secs as i64))
+                    let secs = crate::data::metrics_system::uptime_secs().unwrap_or(0);
+                    #[allow(clippy::cast_possible_wrap)]
+                    let secs = secs as i64;
+                    Some(now - time::Duration::seconds(secs))
                 }
             }
             Self::Last24h => Some(now - time::Duration::hours(24)),

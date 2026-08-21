@@ -9,22 +9,33 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+    routing::get,
+    Router,
+};
 use clap::Parser;
 use scorer::{baseline::SystemProfile, ResourceBaseline};
 use serde_json::{json, Value};
 use time::OffsetDateTime;
 use tokio::time::interval;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer};
+use vitals_core::api::LogsQuery;
+#[cfg(feature = "systemd")]
+use vitals_daemon::data::traits::UnitMetricsReader;
+#[cfg(feature = "systemd")]
+use vitals_daemon::data::{
+    journal_sd::SystemdJournalReader, metrics_procfs::UnitMetricsCollector,
+    metrics_system::ProcfsSystemMetricsReader, systemd_zbus::ZbusSystemdReader,
+};
 use vitals_daemon::{
     agg::aggregate_issues_with_config,
     config::{validate_config, Config},
     data::{
         mock::{MockJournal, MockMetrics, MockSystemd},
-        traits::{
-            JournalEntry, JournalReader, Metrics, MetricsReader, SystemdReader, UnitMetrics,
-            UnitMetricsReader,
-        },
+        traits::{JournalEntry, JournalReader, Metrics, MetricsReader, SystemdReader, UnitMetrics},
     },
     health::{score_to_heartbeat_color, score_to_status, HealthBreakdown, TwhsCalculator},
     history::ScoreHistory,
@@ -39,6 +50,7 @@ struct AppState {
     history: Arc<RwLock<ScoreHistory>>,
     config: Arc<Config>,
     notifier: Arc<RwLock<Notifier>>,
+    journal_entries: Arc<RwLock<Vec<JournalEntry>>>,
 }
 
 /// Output format for one-shot mode
@@ -141,30 +153,9 @@ async fn main() -> Result<()> {
 
 /// Run health calculation once and output result
 async fn run_once(config: &Config, args: &Args) -> Result<()> {
-    use vitals_daemon::data::{
-        journal_sd::SystemdJournalReader, metrics_procfs::UnitMetricsCollector,
-        metrics_sysinfo::SysinfoMetricsReader, systemd_zbus::ZbusSystemdReader,
-    };
-
     let data = match args.mode.as_str() {
         "mock" => fetch_mock_data(config).await?,
-        "live" => {
-            let journal_reader =
-                SystemdJournalReader::new().context("Failed to initialize journal reader")?;
-            let systemd_reader = ZbusSystemdReader::new()
-                .await
-                .context("Failed to initialize systemd reader")?;
-            let metrics_reader = SysinfoMetricsReader::new();
-            let unit_metrics_reader = UnitMetricsCollector::new();
-            fetch_live_data_reuse(
-                config,
-                &journal_reader,
-                &systemd_reader,
-                &metrics_reader,
-                &unit_metrics_reader,
-            )
-            .await?
-        }
+        "live" => run_once_live(config).await?,
         _ => anyhow::bail!("Unknown mode: {}", args.mode),
     };
 
@@ -411,6 +402,7 @@ async fn run_daemon(config: Config, args: Args) -> Result<()> {
         history: Arc::new(RwLock::new(ScoreHistory::load_or_new())),
         config: Arc::new(config.clone()),
         notifier: Arc::new(RwLock::new(Notifier::new(config.notifier.clone()))),
+        journal_entries: Arc::new(RwLock::new(Vec::new())),
     };
 
     // Start health calculation task
@@ -566,6 +558,7 @@ fn create_app(state: AppState) -> Router {
         .route("/score", get(score_handler))
         .route("/metrics", get(metrics_handler))
         .route("/history", get(history_handler))
+        .route("/logs", get(logs_handler))
         .route("/", get(root_handler))
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
@@ -585,7 +578,8 @@ async fn root_handler() -> Json<Value> {
             "/health",
             "/score",
             "/metrics",
-            "/history"
+            "/history",
+            "/logs"
         ]
     }))
 }
@@ -638,6 +632,37 @@ async fn history_handler(State(state): State<AppState>) -> Result<Json<Value>, S
         "change_24h": history.change_over_period(86400,     history.all_records().back().map_or(0.0, |r| r.score), now_ts).map(round1),
         "change_7d":  history.change_over_period(7 * 86400, history.all_records().back().map_or(0.0, |r| r.score), now_ts).map(round1),
     })))
+}
+
+/// Logs endpoint handler - returns aggregated journal entries
+async fn logs_handler(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<vitals_core::api::LogsResponse>, StatusCode> {
+    let entries = state
+        .journal_entries
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let config = &state.config;
+    let now = OffsetDateTime::now_utc();
+    #[allow(clippy::cast_possible_wrap)]
+    let window_start = now - time::Duration::hours(config.daemon.journal_time_window_hours as i64);
+
+    let window = vitals_core::api::TimeWindow {
+        start: window_start,
+        end: now,
+        description: format!("last {} hours", config.daemon.journal_time_window_hours),
+    };
+
+    let collected = vitals_daemon::logs::collect_log_entries(&entries, &window);
+    let (total, page) = vitals_daemon::logs::apply_query(collected, &query);
+
+    Ok(Json(vitals_core::api::LogsResponse {
+        total,
+        entries: page,
+        time_window: window,
+    }))
 }
 
 /// Health endpoint handler - returns JSON health breakdown
@@ -846,15 +871,10 @@ fn resource_status_to_metric(status: &vitals_daemon::health::ResourceStatus) -> 
 ///
 /// Live-mode readers are constructed once before the loop so that:
 /// - The journal reader's internal cursor accumulates across ticks (incremental reads)
-/// - The sysinfo `System` instance is refreshed incrementally, not re-created
+/// - CPU samples are taken per tick via procfs (two-sample measurement)
 /// - The D-Bus connection is reused rather than re-established every tick
 #[allow(clippy::too_many_lines)]
 async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Result<()> {
-    use vitals_daemon::data::{
-        journal_sd::SystemdJournalReader, metrics_procfs::UnitMetricsCollector,
-        metrics_sysinfo::SysinfoMetricsReader, systemd_zbus::ZbusSystemdReader,
-    };
-
     let mut calculator = TwhsCalculator::new(
         state.config.twhs.clone(),
         ResourceBaseline::from_system_profile(SystemProfile::detect(), 300),
@@ -865,19 +885,8 @@ async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Re
     ));
 
     // Construct live readers once — reused across every tick
-    let live_readers: Option<(
-        SystemdJournalReader,
-        ZbusSystemdReader,
-        SysinfoMetricsReader,
-        UnitMetricsCollector,
-    )> = if mode == "live" {
-        let journal = SystemdJournalReader::new().context("Failed to initialize journal reader")?;
-        let systemd = ZbusSystemdReader::new()
-            .await
-            .context("Failed to initialize systemd reader")?;
-        let metrics = SysinfoMetricsReader::new();
-        let unit_metrics = UnitMetricsCollector::new();
-        Some((journal, systemd, metrics, unit_metrics))
+    let live_readers: Option<LiveReaders> = if mode == "live" {
+        Some(build_live_readers().await?)
     } else {
         None
     };
@@ -895,10 +904,7 @@ async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Re
 
         let result = match mode.as_str() {
             "mock" => fetch_mock_data(&state.config).await,
-            "live" => {
-                let (j, s, m, u) = live_readers.as_ref().expect("live readers must be Some");
-                fetch_live_data_reuse(&state.config, j, s, m, u).await
-            }
+            "live" => fetch_live_tick(&state.config, live_readers.as_ref()).await,
             _ => {
                 eprintln!("Unknown mode: {mode}");
                 continue;
@@ -950,6 +956,10 @@ async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Re
                     *health_data = Some(breakdown.clone());
                 } else {
                     eprintln!("Failed to update health data");
+                }
+
+                if let Ok(mut entries) = state.journal_entries.write() {
+                    *entries = fetched.journal_entries;
                 }
 
                 if let Ok(mut history) = state.history.write() {
@@ -1033,13 +1043,93 @@ struct FetchedData {
     journal_entries: Vec<JournalEntry>,
 }
 
+/// Live data sources, constructed once and reused across ticks.
+#[cfg(feature = "systemd")]
+type LiveReaders = (
+    SystemdJournalReader,
+    ZbusSystemdReader,
+    ProcfsSystemMetricsReader,
+    UnitMetricsCollector,
+);
+
+/// Placeholder type when the systemd feature is disabled; never constructed.
+#[cfg(not(feature = "systemd"))]
+type LiveReaders = ();
+
+/// Build the live data sources for one-shot mode.
+#[cfg(feature = "systemd")]
+async fn run_once_live(config: &Config) -> Result<FetchedData> {
+    let journal_reader =
+        SystemdJournalReader::new().context("Failed to initialize journal reader")?;
+    let systemd_reader = ZbusSystemdReader::new()
+        .await
+        .context("Failed to initialize systemd reader")?;
+    let metrics_reader = ProcfsSystemMetricsReader::new();
+    let unit_metrics_reader = UnitMetricsCollector::new();
+    fetch_live_data_reuse(
+        config,
+        &journal_reader,
+        &systemd_reader,
+        &metrics_reader,
+        &unit_metrics_reader,
+    )
+    .await
+}
+
+/// One-shot live mode without the systemd feature is unsupported.
+#[cfg(not(feature = "systemd"))]
+#[allow(clippy::unused_async)]
+async fn run_once_live(_config: &Config) -> Result<FetchedData> {
+    anyhow::bail!(
+        "--mode live requires the 'systemd' cargo feature; \
+         rebuild with --features systemd or use --mode mock"
+    )
+}
+
+/// Build the live data sources for daemon mode.
+#[cfg(feature = "systemd")]
+async fn build_live_readers() -> Result<LiveReaders> {
+    let journal = SystemdJournalReader::new().context("Failed to initialize journal reader")?;
+    let systemd = ZbusSystemdReader::new()
+        .await
+        .context("Failed to initialize systemd reader")?;
+    let metrics = ProcfsSystemMetricsReader::new();
+    let unit_metrics = UnitMetricsCollector::new();
+    Ok((journal, systemd, metrics, unit_metrics))
+}
+
+/// Daemon live mode without the systemd feature is unsupported.
+#[cfg(not(feature = "systemd"))]
+#[allow(clippy::unused_async)]
+async fn build_live_readers() -> Result<LiveReaders> {
+    anyhow::bail!(
+        "--mode live requires the 'systemd' cargo feature; \
+         rebuild with --features systemd or use --mode mock"
+    )
+}
+
+/// Fetch one tick of live data using the shared readers.
+#[cfg(feature = "systemd")]
+async fn fetch_live_tick(config: &Config, readers: Option<&LiveReaders>) -> Result<FetchedData> {
+    let (j, s, m, u) = readers.expect("live readers must be Some");
+    fetch_live_data_reuse(config, j, s, m, u).await
+}
+
+/// Unreachable: live mode is rejected at startup without the feature.
+#[cfg(not(feature = "systemd"))]
+#[allow(clippy::unused_async)]
+async fn fetch_live_tick(_config: &Config, _readers: Option<&LiveReaders>) -> Result<FetchedData> {
+    unreachable!("live mode requires the systemd feature")
+}
+
 /// Fetch data using real system sources (readers constructed once and reused).
+#[cfg(feature = "systemd")]
 async fn fetch_live_data_reuse(
     config: &Config,
-    journal_reader: &vitals_daemon::data::journal_sd::SystemdJournalReader,
-    systemd_reader: &vitals_daemon::data::systemd_zbus::ZbusSystemdReader,
-    metrics_reader: &vitals_daemon::data::metrics_sysinfo::SysinfoMetricsReader,
-    unit_metrics_reader: &vitals_daemon::data::metrics_procfs::UnitMetricsCollector,
+    journal_reader: &SystemdJournalReader,
+    systemd_reader: &ZbusSystemdReader,
+    metrics_reader: &ProcfsSystemMetricsReader,
+    unit_metrics_reader: &UnitMetricsCollector,
 ) -> Result<FetchedData> {
     #[allow(clippy::cast_possible_wrap)]
     let since_time = OffsetDateTime::now_utc()

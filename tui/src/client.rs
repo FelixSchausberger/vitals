@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use url::form_urlencoded;
 use vitals_core::{
     addr::DaemonAddr,
-    api::{HealthResponse, LogsResponse},
+    api::{HealthResponse, LogsQuery, LogsResponse, SeverityFilter},
 };
 
 /// Client for interacting with the vitals daemon API
@@ -57,12 +58,17 @@ impl DaemonClient {
         }
     }
 
-    /// Fetch logs from /logs endpoint
-    #[allow(dead_code)]
-    pub async fn get_logs(&self) -> Result<LogsResponse> {
+    /// Fetch logs from /logs endpoint with optional filtering/pagination
+    pub async fn get_logs(&self, query: &LogsQuery) -> Result<LogsResponse> {
+        let qs = encode_query(query);
+        let endpoint = if qs.is_empty() {
+            "/logs".to_string()
+        } else {
+            format!("/logs?{qs}")
+        };
         match &self.addr {
             DaemonAddr::Unix { path } => {
-                let body = unix_http_get(path, "/logs").await?;
+                let body = unix_http_get(path, &endpoint).await?;
                 serde_json::from_slice(&body).context("Failed to parse logs response")
             }
             DaemonAddr::Tcp { url } => {
@@ -70,7 +76,7 @@ impl DaemonClient {
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
                     .context("Failed to create HTTP client")?;
-                let url = format!("{url}/logs");
+                let url = format!("{url}{endpoint}");
                 let response = client
                     .get(&url)
                     .send()
@@ -112,6 +118,41 @@ impl DaemonClient {
             }
         }
     }
+}
+
+/// Encode a [`LogsQuery`] as URL query parameters (no leading `?`).
+fn encode_query(query: &LogsQuery) -> String {
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    if let Some(severity) = query.severity {
+        let name = match severity {
+            SeverityFilter::Error => "error",
+            SeverityFilter::Warning => "warning",
+            SeverityFilter::Info => "info",
+        };
+        serializer.append_pair("severity", name);
+    }
+    if let Some(ref unit) = query.unit {
+        serializer.append_pair("unit", unit);
+    }
+    if let Some(since) = query.since {
+        serializer.append_pair("since", &format_rfc3339(since));
+    }
+    if let Some(until) = query.until {
+        serializer.append_pair("until", &format_rfc3339(until));
+    }
+    if let Some(limit) = query.limit {
+        serializer.append_pair("limit", &limit.to_string());
+    }
+    if query.offset != 0 {
+        serializer.append_pair("offset", &query.offset.to_string());
+    }
+    serializer.finish()
+}
+
+/// Format a timestamp as RFC 3339 for use in query parameters.
+fn format_rfc3339(ts: time::OffsetDateTime) -> String {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| String::from("invalid-timestamp"))
 }
 
 /// Make an HTTP GET request over a Unix domain socket.

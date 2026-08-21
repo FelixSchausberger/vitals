@@ -7,6 +7,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Temporal Weighted Health Score algorithm"
+keywords = ["monitoring", "health", "scoring"]
+categories = ["algorithms"]
+readme = "../README.md"
 
 [dependencies]
 serde.workspace = true

@@ -20,7 +20,7 @@ Backend daemon providing JSON API:
 - `/health` - Returns health score, issues, and resource metrics
 - `/logs` - Returns aggregated log entries
 - Collects data from systemd, journald, and procfs
-- Calculates health scores with EWMA smoothing
+- Calculates health scores with temporal weighting
 - Aggregates repeated log entries
 
 ### vitals-tui
@@ -106,7 +106,7 @@ cargo run -- --daemon-url http://localhost:8080
 
 ## Future Features
 
-- Log filtering (by service, severity, time)
+- Log filtering by service, severity, time range (TUI UI)
 - Interactive drill-down into full logs
 - Help overlay (press `?`)
 - Search functionality

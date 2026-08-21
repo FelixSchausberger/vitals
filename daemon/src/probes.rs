@@ -390,11 +390,10 @@ fn parse_blame_line(line: &str) -> Option<(f64, &str)> {
     }
 }
 
-use sysinfo::System;
-
 /// Estimate system boot time from uptime.
 fn estimate_boot_time() -> OffsetDateTime {
+    let secs = crate::data::metrics_system::uptime_secs().unwrap_or(0);
     #[allow(clippy::cast_possible_wrap)]
-    let secs = System::uptime() as i64;
+    let secs = secs as i64;
     OffsetDateTime::now_utc() - time::Duration::seconds(secs)
 }
