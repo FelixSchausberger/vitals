@@ -97,10 +97,7 @@ impl DaemonClient {
     #[allow(dead_code)]
     pub async fn ping(&self) -> bool {
         match &self.addr {
-            DaemonAddr::Unix { path } => tokio::net::UnixStream::connect(path)
-                .await
-                .map(|_| true)
-                .unwrap_or(false),
+            DaemonAddr::Unix { path } => tokio::net::UnixStream::connect(path).await.is_ok(),
             DaemonAddr::Tcp { url } => {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(2))
@@ -111,8 +108,7 @@ impl DaemonClient {
                         .get(format!("{url}/health"))
                         .send()
                         .await
-                        .map(|r| r.status().is_success())
-                        .unwrap_or(false),
+                        .is_ok_and(|r| r.status().is_success()),
                     None => false,
                 }
             }

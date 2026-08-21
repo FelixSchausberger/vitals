@@ -87,9 +87,9 @@ impl SystemdJournalReader {
 
         let message = record
             .get("MESSAGE")
-            .map_or("(no message)".to_string(), |s| s.to_string());
+            .map_or("(no message)".to_string(), |s| s.clone());
 
-        let unit = record.get("_SYSTEMD_UNIT").map(|s| s.to_string());
+        let unit = record.get("_SYSTEMD_UNIT").cloned();
         let pid = record.get("_PID").and_then(|p| p.parse().ok());
 
         Ok(JournalEntry {
@@ -194,7 +194,7 @@ impl JournalReader for SystemdJournalReader {
         }
 
         // Most-recent-first for the caller
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
 
         Ok(entries)
     }
@@ -243,7 +243,7 @@ impl JournalReader for SystemdJournalReader {
             }
         }
 
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
 
         Ok(entries)
     }
