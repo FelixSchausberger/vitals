@@ -77,7 +77,6 @@ fn fallback_frecency(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp, clippy::uninlined_format_args)]
-    #![allow(clippy::float_cmp, clippy::uninlined_format_args)]
     use time::macros::datetime;
 
     use super::*;

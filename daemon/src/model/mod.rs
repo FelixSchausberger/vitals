@@ -6,9 +6,10 @@ pub mod issue {
 }
 
 /// Time filter for log entries
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TimeFilter {
     /// Show logs since last boot
+    #[default]
     SinceBoot,
     /// Show logs from last 24 hours
     Last24h,
@@ -74,11 +75,5 @@ impl TimeFilter {
             Self::LastMonth => Some(now - time::Duration::days(30)),
             Self::All => None, // No time constraint
         }
-    }
-}
-
-impl Default for TimeFilter {
-    fn default() -> Self {
-        Self::SinceBoot
     }
 }
