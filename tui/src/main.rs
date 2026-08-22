@@ -1,29 +1,31 @@
-use std::{io, path::PathBuf};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-    Terminal,
-};
-use vitals_core::{
-    addr::{resolve_daemon_addr, DaemonAddr},
-    api::HealthResponse,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
+mod app;
 mod client;
+mod config;
 mod ui;
 
+use app::{App, ViewMode};
 use client::DaemonClient;
+use config::TuiConfig;
+use time::OffsetDateTime;
+use vitals_core::{
+    addr::{resolve_daemon_addr, DaemonAddr},
+    api::LogsQuery,
+};
 
 /// Command-line arguments
 #[derive(Parser, Debug)]
@@ -39,21 +41,24 @@ struct Args {
     daemon_socket: Option<String>,
 
     /// Refresh interval in seconds
-    #[arg(long, default_value = "2", help = "Refresh interval in seconds")]
-    refresh: u64,
+    #[arg(long, help = "Refresh interval in seconds [default: 2]")]
+    refresh: Option<u64>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Persistent settings; CLI arguments take precedence.
+    let config = TuiConfig::load().context("Failed to load TUI configuration")?;
+
     // Check if we're in a TTY
-    if !atty::is(atty::Stream::Stdout) {
+    if !io::stdout().is_terminal() {
         anyhow::bail!("vitals-tui requires a TTY. Use vitals-daemon for non-TTY output.");
     }
 
     // Resolve daemon address
-    let addr = resolve_daemon_addr_from_args(&args);
+    let addr = resolve_daemon_addr_from_args(&args, &config);
 
     // Initialize daemon client
     let client = DaemonClient::from_addr(addr);
@@ -66,7 +71,19 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the TUI
-    let res = run_tui(&mut terminal, client, args.refresh).await;
+    let refresh_secs = args.refresh.or(config.refresh_secs).unwrap_or(2);
+    if let Some(raw) = config
+        .default_view
+        .as_deref()
+        .filter(|v| view_from_str(v).is_none())
+    {
+        eprintln!("Ignoring unknown default_view {raw:?} in tui.toml");
+    }
+    let initial_view = config.default_view.as_deref().and_then(view_from_str);
+    let app = App::new()
+        .with_mode(initial_view.unwrap_or_default())
+        .with_refresh_interval(Duration::from_secs(refresh_secs));
+    let res = run_app(&mut terminal, client, app, refresh_secs).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -84,7 +101,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_daemon_addr_from_args(args: &Args) -> DaemonAddr {
+/// Map a `default_view` config value to a view mode.
+fn view_from_str(value: &str) -> Option<ViewMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "summary" => Some(ViewMode::Summary),
+        "detailed" => Some(ViewMode::Detailed),
+        "logs" => Some(ViewMode::Logs),
+        _ => None,
+    }
+}
+
+fn resolve_daemon_addr_from_args(args: &Args, config: &TuiConfig) -> DaemonAddr {
     if let Some(ref path) = args.daemon_socket {
         return DaemonAddr::Unix {
             path: PathBuf::from(path),
@@ -97,173 +124,98 @@ fn resolve_daemon_addr_from_args(args: &Args) -> DaemonAddr {
         };
     }
 
+    if let Some(ref path) = config.daemon_socket {
+        return DaemonAddr::Unix {
+            path: PathBuf::from(path),
+        };
+    }
+
+    if let Some(ref url) = config.daemon_url {
+        return DaemonAddr::Tcp {
+            url: url.trim_end_matches('/').to_string(),
+        };
+    }
+
     resolve_daemon_addr()
 }
 
-async fn run_tui(
+async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     client: DaemonClient,
+    mut app: App,
     refresh_secs: u64,
 ) -> Result<()> {
-    let mut last_update = std::time::Instant::now();
-    let refresh_interval = std::time::Duration::from_secs(refresh_secs);
+    let refresh_interval = Duration::from_secs(refresh_secs);
 
-    let mut health_data: Option<HealthResponse> = None;
+    // Force an initial fetch on the first loop iteration.
+    let mut last_fetch = Instant::now()
+        .checked_sub(refresh_interval)
+        .unwrap_or_else(Instant::now);
 
     loop {
-        // Fetch data if needed
-        if health_data.is_none() || last_update.elapsed() >= refresh_interval {
-            health_data = Some(
+        if last_fetch.elapsed() >= refresh_interval {
+            app.health = Some(
                 client
                     .get_health()
                     .await
                     .context("Failed to fetch health data")?,
             );
-            last_update = std::time::Instant::now();
+            if app.mode == ViewMode::Logs {
+                let query = app.log_filters.to_query(OffsetDateTime::now_utc());
+                app.logs = Some(
+                    client
+                        .get_logs(&query)
+                        .await
+                        .context("Failed to fetch logs")?,
+                );
+                app.logs_fetched_at = Some(Instant::now());
+            }
+            last_fetch = Instant::now();
+            app.clamp_selections();
         }
 
-        // Render UI
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3), // Health score
-                    Constraint::Min(5),    // Issues
-                    Constraint::Length(3), // Metrics bar
-                ])
-                .split(f.area());
+        if app.logs_stale {
+            let query = app.log_filters.to_query(OffsetDateTime::now_utc());
+            app.logs = Some(
+                client
+                    .get_logs(&query)
+                    .await
+                    .context("Failed to fetch logs")?,
+            );
+            app.logs_stale = false;
+            app.logs_fetched_at = Some(Instant::now());
+            app.refresh_units_from_logs();
+            app.clamp_selections();
+        }
 
-            if let Some(ref data) = health_data {
-                // Health score section
-                let health_score = format_health_score(data);
-                let health_para = Paragraph::new(health_score)
-                    .block(Block::default().borders(Borders::ALL).title("Health Score"));
-                f.render_widget(health_para, chunks[0]);
+        if app.related_stale {
+            let unit = app.detail.as_ref().and_then(|d| match &d.kind {
+                app::DrillDown::Issue { unit, .. } => unit.clone(),
+                app::DrillDown::Log { .. } => None,
+            });
+            let query = LogsQuery {
+                unit,
+                ..LogsQuery::default()
+            };
+            app.related_logs = Some(
+                client
+                    .get_logs(&query)
+                    .await
+                    .context("Failed to fetch related logs")?,
+            );
+            app.related_stale = false;
+        }
 
-                // Issues section
-                let issues_text = format_issues(data);
-                let issues_para = Paragraph::new(issues_text)
-                    .block(Block::default().borders(Borders::ALL).title("Issues"));
-                f.render_widget(issues_para, chunks[1]);
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
-                // Metrics bar
-                let metrics_text = format_metrics(data);
-                let metrics_para =
-                    Paragraph::new(metrics_text).block(Block::default().borders(Borders::NONE));
-                f.render_widget(metrics_para, chunks[2]);
-            } else {
-                let loading = Paragraph::new("Loading...")
-                    .block(Block::default().borders(Borders::ALL).title("Status"));
-                f.render_widget(loading, chunks[0]);
-            }
-        })?;
-
-        // Handle input with timeout
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if should_quit(key) {
-                    return Ok(());
-                }
+                app.on_key(key);
             }
         }
+
+        if app.should_quit {
+            return Ok(());
+        }
     }
-}
-
-fn format_health_score(data: &HealthResponse) -> Line<'_> {
-    let score = data.score;
-    let color = match data.heartbeat.as_str() {
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "red" => Color::Red,
-        _ => Color::White,
-    };
-
-    Line::from(vec![
-        Span::raw("Health Score: "),
-        Span::styled(
-            format!("{score:.1}/100"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(" ({})", data.status)),
-    ])
-}
-
-fn format_issues(data: &HealthResponse) -> Vec<Line<'_>> {
-    let mut lines = vec![];
-
-    if data.breakdown.total == 0 {
-        lines.push(Line::from(Span::styled(
-            "No issues detected",
-            Style::default().fg(Color::Green),
-        )));
-        return lines;
-    }
-
-    // Show top issues
-    for issue in data.issues.iter().take(10) {
-        let severity_color = match issue.severity {
-            vitals_core::Severity::Error => Color::Red,
-            vitals_core::Severity::Warning => Color::Yellow,
-            vitals_core::Severity::Info => Color::Cyan,
-        };
-
-        let severity_str = match issue.severity {
-            vitals_core::Severity::Error => "[ERR]",
-            vitals_core::Severity::Warning => "[WARN]",
-            vitals_core::Severity::Info => "[INFO]",
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:>3}\u{d7}", issue.count),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw(" "),
-            Span::styled(severity_str, Style::default().fg(severity_color)),
-            Span::raw(" "),
-            Span::raw(&issue.title),
-        ]));
-    }
-
-    if data.issues.len() > 10 {
-        lines.push(Line::from(Span::styled(
-            format!("... and {} more", data.issues.len() - 10),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    lines
-}
-
-fn format_metrics(data: &HealthResponse) -> Line<'_> {
-    if let Some(ref resources) = data.resources {
-        Line::from(vec![
-            Span::raw("CPU "),
-            Span::styled(
-                format!("{:.1}%", resources.cpu_usage),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("  |  MEM "),
-            Span::styled(
-                format!("{:.1}%", resources.memory_usage),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("  |  DISK "),
-            Span::styled(
-                format!("{:.1}%", resources.disk_usage),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("  |  LOAD "),
-            Span::styled(
-                format!("{:.2}", resources.load_average),
-                Style::default().fg(Color::Cyan),
-            ),
-        ])
-    } else {
-        Line::from("Resource metrics not available")
-    }
-}
-
-fn should_quit(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('q' | 'Q') | KeyCode::Esc)
 }

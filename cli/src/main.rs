@@ -33,6 +33,9 @@ enum Cmd {
     Status {
         #[arg(long, value_enum, default_value = "human")]
         format: Format,
+        /// Show detailed view with resource bars and burden breakdown
+        #[arg(long)]
+        detail: bool,
     },
     /// List active issues that impact the score
     Issues,
@@ -128,11 +131,17 @@ async fn main() -> Result<()> {
     let daemon_addr = resolve_daemon_addr_from_args(&args);
 
     match args.command {
-        Cmd::Status { format } => {
+        Cmd::Status { format, detail } => {
             let health = fetch_health(&daemon_addr).await?;
             let history = fetch_history(&daemon_addr).await.ok();
             match format {
-                Format::Human => print_human(&health, history.as_ref()),
+                Format::Human => {
+                    if detail {
+                        print_detail(&health, history.as_ref());
+                    } else {
+                        print_human(&health, history.as_ref());
+                    }
+                }
                 Format::Ironbar => print_ironbar(&health, history.as_ref()),
                 Format::Json => {
                     let raw = fetch_json_value(&daemon_addr, "/health").await?;
@@ -271,23 +280,222 @@ async fn unix_http_get(socket_path: &std::path::Path, endpoint: &str) -> Result<
 
 // ── output formatters ─────────────────────────────────────────────────────────
 
+const BAR_WIDTH: usize = 20;
+const BAR_FILLED: char = '█';
+const BAR_EMPTY: char = '░';
+
+/// Build a unicode progress bar.
+///
+/// `value` is the current value, `max` is the theoretical maximum (used for scaling).
+/// The bar fill is always proportional to `value / max`, clamped to [0, 1].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn build_bar(value: f64, max: f64, width: usize) -> String {
+    let ratio = if max > 0.0 {
+        (value / max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let filled = (ratio * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!(
+        "{}{}",
+        BAR_FILLED.to_string().repeat(filled),
+        BAR_EMPTY.to_string().repeat(empty)
+    )
+}
+
+/// Collect all burden sources, sorted by absolute impact descending.
+///
+/// Returns up to `max_items` entries. If there are more, appends an "other" summary.
+fn collect_burden_sources(h: &HealthResponse, max_items: usize) -> Vec<(String, f64)> {
+    let mut sources: Vec<(String, f64)> = Vec::new();
+
+    // Resource penalties (each dimension as a separate source)
+    if let Some(ref res) = h.resources {
+        if res.cpu_penalty > 0.05 {
+            sources.push(("CPU".into(), res.cpu_penalty));
+        }
+        if res.memory_penalty > 0.05 {
+            sources.push(("Memory".into(), res.memory_penalty));
+        }
+        if res.disk_penalty > 0.05 {
+            sources.push(("Disk".into(), res.disk_penalty));
+        }
+        if res.load_penalty > 0.05 {
+            sources.push(("Load".into(), res.load_penalty));
+        }
+    }
+
+    // Issue impacts (grouped by severity)
+    let mut issue_burden = 0.0;
+    for issue in &h.issues {
+        issue_burden += issue.impact.abs();
+    }
+    if issue_burden > 0.05 {
+        sources.push(("Issues".into(), issue_burden));
+    }
+
+    sources.sort_by(|a, b| {
+        b.1.abs()
+            .partial_cmp(&a.1.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if sources.len() > max_items {
+        let shown: f64 = sources.iter().take(max_items).map(|(_, b)| b).sum();
+        let total: f64 = sources.iter().map(|(_, b)| b).sum();
+        sources.truncate(max_items);
+        let other = total - shown;
+        if other > 0.05 {
+            sources.push(("Other".into(), other));
+        }
+    }
+
+    sources
+}
+
+/// Compact human-readable output (default).
 fn print_human(h: &HealthResponse, history: Option<&HistoryResponse>) {
     let trend = history
         .and_then(|hist| hist.change_24h)
         .map(|d| format!(" ({d:+.1} 24h)"))
         .unwrap_or_default();
-    println!("Health: {:.1}/100 ({}){}", h.score, h.status, trend);
+    println!("Score {:.1}/100 ({}){}", h.score, h.status, trend);
+
+    if let Some(ref res) = h.resources {
+        println!(
+            "CPU {:>5.1}%  MEM {:>5.1}%  DISK {:>5.1}%  LOAD {:>5.2}",
+            res.cpu_usage, res.memory_usage, res.disk_usage, res.load_average
+        );
+    }
+
+    let sources = collect_burden_sources(h, 3);
+    if !sources.is_empty() {
+        let parts: Vec<String> = sources
+            .iter()
+            .map(|(label, burden)| format!("−{burden:.1} {label}"))
+            .collect();
+        println!("Burden: {}", parts.join("  "));
+    }
+
     if h.breakdown.errors > 0 || h.breakdown.warnings > 0 {
         println!(
             "Issues: {} error(s), {} warning(s), {} info",
             h.breakdown.errors, h.breakdown.warnings, h.breakdown.info
         );
     }
+}
+
+fn box_top(title: &str, w: usize) {
+    let dash_count = w.saturating_sub(title.len() + 3); // "─ " and " ─"
+    let right = dash_count / 2;
+    let left = dash_count - right;
+    println!("┌─{}─{}─{}┐", "─".repeat(left), title, "─".repeat(right));
+}
+
+fn box_line(content: &str, w: usize) {
+    let pad = w.saturating_sub(content.len());
+    println!("│ {}{}│", content, " ".repeat(pad));
+}
+
+fn box_bottom(w: usize) {
+    println!("└{}┘", "─".repeat(w));
+}
+
+/// Detailed bordered output with resource bars and burden breakdown.
+fn print_detail(h: &HealthResponse, history: Option<&HistoryResponse>) {
+    let w: usize = 60; // inner width (between │ chars)
+
+    // ── Health ──
+    box_top("Health", w);
+    let trend = history
+        .and_then(|hist| hist.change_24h)
+        .map(|d| format!("  ({d:+.1} 24h)"))
+        .unwrap_or_default();
+    box_line(
+        &format!("Score  {:.1} / 100  ({}){}", h.score, h.status, trend),
+        w,
+    );
+    box_bottom(w);
+
+    // ── Resources ──
     if let Some(ref res) = h.resources {
-        println!(
-            "Resources: CPU {:.1}%, Mem {:.1}%, Load {:.2}",
-            res.cpu_usage, res.memory_usage, res.load_average
-        );
+        println!();
+        box_top("Resources", w);
+        let r_max = 20.0;
+        for (name, usage, penalty, suffix, max_val) in [
+            ("CPU ", res.cpu_usage, res.cpu_penalty, "%", 100.0),
+            ("MEM ", res.memory_usage, res.memory_penalty, "%", 100.0),
+            ("DISK", res.disk_usage, res.disk_penalty, "%", 100.0),
+            ("LOAD", res.load_average, res.load_penalty, "", 10.0),
+        ] {
+            let bar = build_bar(usage, max_val, BAR_WIDTH);
+            let status_char = if penalty > r_max * 0.6 {
+                "✗"
+            } else if penalty > r_max * 0.2 {
+                "!"
+            } else {
+                "✓"
+            };
+            let value_str = if suffix.is_empty() {
+                format!("{usage:.2}")
+            } else {
+                format!("{usage:>5.1}{suffix}")
+            };
+            box_line(&format!("{name} {bar} {value_str}  {status_char}"), w);
+        }
+        box_bottom(w);
+    }
+
+    // ── Burden Breakdown ──
+    let sources = collect_burden_sources(h, 5);
+    if !sources.is_empty() {
+        let max_burden = sources.iter().map(|(_, b)| *b).fold(0.0_f64, f64::max);
+        println!();
+        box_top("Burden Breakdown", w);
+        for (label, burden) in &sources {
+            let bar = build_bar(*burden, max_burden, BAR_WIDTH);
+            let value_str = format!("−{burden:.1}");
+            box_line(&format!("{label:<8} {bar} {value_str}"), w);
+        }
+        box_bottom(w);
+    }
+
+    // ── Issues ──
+    println!();
+    box_top("Issues", w);
+    if h.issues.is_empty() {
+        box_line("No active issues.", w);
+    } else {
+        for issue in &h.issues {
+            let sev = match issue.severity.as_str() {
+                "Error" => "ERR ",
+                "Warning" => "WARN",
+                "Info" => "INFO",
+                _ => "????",
+            };
+            let line = format!("{}× [{}] {}", issue.count, sev, issue.title);
+            let truncated = if line.len() > w - 1 {
+                format!("{}…", &line[..w - 2])
+            } else {
+                line
+            };
+            box_line(&truncated, w);
+        }
+    }
+    box_bottom(w);
+
+    // ── History ──
+    if let Some(hist) = history.filter(|h| !h.records.is_empty()) {
+        let sparkline = build_sparkline(&hist.records, w - 1);
+        println!();
+        box_top("History (7d)", w);
+        box_line(&sparkline, w);
+        box_bottom(w);
     }
 }
 

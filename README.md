@@ -1,191 +1,149 @@
 # Vitals
 
+[![CI Pipeline](https://github.com/schausberger/vitals/actions/workflows/ci.yml/badge.svg)](https://github.com/schausberger/vitals/actions)
+
 > Lightweight system health monitoring suite for Linux with systemd integration
 
-**Status**: Cargo workspace monorepo with 3-crate architecture
+## About
 
-## Overview
+Vitals is a system monitoring suite organized as a Cargo workspace with four
+crates plus a shared algorithm library:
 
-Vitals is a system monitoring suite organized as a Cargo workspace with three cleanly separated components:
+1. **vitals-core** (`core/`) — Shared data models and API types
+2. **scorer** (`scorer/`) — Temporal Weighted Health Score algorithm
+3. **vitals-daemon** (`daemon/`) — Backend service with HTTP/JSON API
+4. **vitals-tui** (`tui/`) — Terminal UI that consumes the daemon API
+5. **vitals-cli** (`cli/`) — Command-line query tool
 
-1. **vitals-core** (`core/`) - Shared data models and API types
-2. **vitals-daemon** (`daemon/`) - Backend daemon with JSON API
-3. **vitals-tui** (`tui/`) - Terminal UI that consumes the API
+## Screenshots
 
-## Architecture Diagram
+| Healthy | Degraded | Critical |
+|---------|----------|----------|
+| ![Healthy system](.github/assets/tui-healthy.png) | ![Degraded system](.github/assets/tui-degraded.png) | ![Critical system](.github/assets/tui-critical.png) |
 
-```
-┌──────────────────┐
-│ vitals-tui  │  Terminal UI
-│                  │
-│  - Ratatui TUI   │  Displays:
-│  - HTTP client   │  - Health score (colored)
-│  - Auto-refresh  │  - Aggregated issues
-│                  │  - System metrics
-└────────┬─────────┘
-         │
-         │ HTTP/JSON API
-         │
-         ↓
-┌────────────────────┐
-│ vitals-daemon │  Backend Service
-│                    │
-│  Endpoints:        │  Data Sources:
-│  - /health         │  - journald (logs)
-│  - /logs           │  - systemd (units)
-│  - /metrics        │  - procfs (metrics)
-│                    │
-│  Processing:       │
-│  - Issue aggreg.   │
-│  - Health scoring  │
-│  - EWMA smoothing  │
-└────────┬───────────┘
-         │
-         │ depends on
-         ↓
-┌──────────────────┐
-│ vitals-core │  Shared Library
-│                  │
-│  - Issue         │  Data models
-│  - Severity      │  for both daemon
-│  - Health*       │  and TUI
-│  - API types     │
-└──────────────────┘
-```
-
-## Component Details
-
-### vitals-core (`core/`)
-
-**Purpose**: Shared data structures for serialization and API contracts
-
-**Key Types**:
-- `Issue`, `Severity`, `IssueTrend` - Issue models
-- `HealthBreakdown`, `HealthConfig` - Health scoring structures
-- `ResourceHealthMetrics`, `ResourceStatus` - Resource monitoring
-- `HealthResponse`, `LogsResponse` - API response types
-- `LogEntry`, `MetricsSummary` - API data structures
-
-**Dependencies**:
-- serde (serialization)
-- time (timestamps)
-- thiserror (errors)
-
-**Status**: ✅ Built and working
-
-### vitals-daemon (`daemon/`)
-
-**Purpose**: Backend daemon that monitors system health and provides HTTP API
-
-**Key Modules**:
-- `health` - HealthCalculator with EWMA smoothing
-- `agg` - Issue aggregation logic
-- `data` - Data collectors (journald, systemd, procfs)
-- `config` - Configuration management
-- `bin/daemon` - HTTP server (Axum)
-
-**API Endpoints**:
-- `GET /health` - Health score + issues + resources (JSON)
-- `GET /logs` - Aggregated log entries (JSON)
-- `GET /metrics` - Prometheus exposition format
-- `GET /` - API info
-
-**Dependencies**:
-- vitals-core (models)
-- tokio (async runtime)
-- axum (HTTP server)
-- zbus (systemd D-Bus)
-- systemd (journald)
-- sysinfo, procfs (metrics)
-
-**Status**: ⚠️ Partially refactored (needs systemd libs to build)
-
-### vitals-tui (`tui/`)
-
-**Purpose**: Terminal UI that consumes daemon API
-
-**Key Modules**:
-- `main` - TUI event loop and rendering
-- `client` - DaemonClient for HTTP requests
-- `ui` - UI utilities (future expansion)
-
-**Features**:
-- Health score display with color coding (green/yellow/red)
-- Aggregated issues with frequency counts (5× [ERR] ...)
-- System metrics bar (CPU, MEM, DISK, LOAD)
-- Auto-refresh (default: 2s)
-- Keyboard controls (q to quit)
-
-**Dependencies**:
-- vitals-core (models)
-- ratatui (TUI framework)
-- crossterm (terminal control)
-- reqwest (HTTP client with rustls)
-- tokio (async runtime)
-
-**Status**: ✅ Built and ready to use
-
-## Design Principles
-
-### 1. Clean Separation
-
-- **Daemon**: Collects data, calculates scores, exposes API
-- **TUI**: Consumes API, renders UI
-- **Core**: Shared contract between daemon and TUI
-
-### 2. Unix Philosophy
-
-- Do one thing well
-- Composable components
-- Standard formats (JSON, Prometheus)
-- TTY-aware output
-
-### 3. Information Hierarchy
-
-Display order:
-1. Health score (most critical)
-2. Errors
-3. Warnings
-4. Info/metrics
-
-### 4. Aggregation Over Noise
-
-- Repeated logs collapsed: `5× [ERR] kernel error`
-- Focus on unique issues, not log volume
-
-### 5. Progressive Detail
-
-- Default: one-screen summary
-- Future: interactive drill-down
-
-## TUI Display Format
+## Architecture
 
 ```
-┌─Health Score──────────────────────────────────────┐
-│ Health Score: 31.3/100 (poor)                     │
-└────────────────────────────────────────────────────┘
-┌─Issues────────────────────────────────────────────┐
-│  5× [ERR]  Oct 07 10:07:06 hp-probook-wsl        │
-│      kernel: misc dxg: dxgkio error               │
-│                                                    │
-│  3× [ERR]  Failed to start Google Drive Mount    │
-│      (gdrive-mount.service)                       │
-│                                                    │
-│  2× [WARN] NetworkManager: DNS configuration     │
-│      issue detected                               │
-└────────────────────────────────────────────────────┘
-CPU 0.5%  |  MEM 6.0%  |  DISK 0.0%  |  LOAD 0.20
+┌──────────────────────┐         ┌──────────────────────┐
+│     vitals-tui       │         │     vitals-cli       │
+│                      │         │                      │
+│  - Ratatui TUI       │         │  - Status / Issues / │
+│  - HTTP client       │         │    History commands  │
+│  - Auto-refresh      │         │  - Human/JSON/Ironbar│
+└──────────┬───────────┘         └──────────┬───────────┘
+           │                                │
+           │      HTTP/JSON API             │
+           └────────────┬───────────────────┘
+                        │
+                        ↓
+        ┌───────────────────────────────┐
+        │       vitals-daemon           │
+        │                               │
+        │  Endpoints:      Data Sources:│
+        │  - /health       - journald   │
+        │  - /score        - systemd    │
+        │  - /metrics      - procfs     │
+        │  - /history                   │
+        │                               │
+        │  Processing:                  │
+        │  - Issue aggregation          │
+        │  - Active probes (OOM, etc.)  │
+        │  - Threshold notifications    │
+        └───────────────┬───────────────┘
+                        │
+               depends on┼───────┐
+                        ↓       ↓
+        ┌──────────────┐  ┌──────────────┐
+        │ vitals-core  │  │   scorer     │
+        │              │  │              │
+        │ Issue        │  │ TWHS algo    │
+        │ Severity     │  │ Temporal     │
+        │ Health*      │  │ frecency     │
+        │ API types    │  │ Baseline     │
+        └──────────────┘  └──────────────┘
 ```
 
-## API Example
+### Data Sources
 
-### Request
+| Source     | What it collects                                |
+|------------|-------------------------------------------------|
+| journald   | System logs, error/warning aggregation          |
+| systemd    | Unit status, restart storms, boot anomalies     |
+| procfs     | CPU, memory, disk usage, load average           |
+
+### Active Probes
+
+| Probe           | Detection method                                    |
+|-----------------|-----------------------------------------------------|
+| OOM kill        | Scan journal entries for kernel OOM kill messages   |
+| Restart storm   | Scan journal for systemd start-limit-hit entries    |
+| Boot anomaly    | `systemd-analyze blame` at startup; flag slow units |
+| RAM trend       | Track per-unit RSS over time; flag monotonic growth |
+
+## Usage
+
+### Nix (Recommended)
+
+```bash
+# Run directly
+nix run github:schausberger/vitals
+
+# Install to profile
+nix profile install github:schausberger/vitals
+
+# Development shell
+nix develop
+```
+
+### Build from Source
+
+```bash
+cargo build --release
+```
+
+### Start Daemon
+
+```bash
+vitals-daemon                    # HTTP server on :8080
+vitals-daemon --once             # One-shot health check
+vitals-daemon --once --explain   # Show score breakdown
+```
+
+### Run TUI
+
+```bash
+vitals-tui --daemon-url http://localhost:8080
+# Press 'q' to quit
+```
+
+### CLI
+
+```bash
+vitals status                    # Human-readable health status
+vitals status --detail           # Detailed view with resource bars
+vitals status --format json      # JSON output
+vitals issues                    # List active issues
+vitals history                   # Rolling 7-day score history
+```
+
+## API
+
+### Endpoints
+
+| Endpoint    | Method | Description                           |
+|-------------|--------|---------------------------------------|
+| `/`         | GET    | API info and available endpoints      |
+| `/health`   | GET    | Health score, issues, and resources   |
+| `/score`    | GET    | Current score with 1h delta           |
+| `/metrics`  | GET    | Prometheus exposition format          |
+| `/history`  | GET    | Rolling 7-day score history           |
+| `/logs`     | GET    | Aggregated journal entries            |
+
+### Example: `/health`
 
 ```bash
 curl http://localhost:8080/health | jq
 ```
-
-### Response
 
 ```json
 {
@@ -207,23 +165,20 @@ curl http://localhost:8080/health | jq
       "severity": "Error",
       "count": 5,
       "impact": -23.1
-    },
-    {
-      "id": "gdrive-mount-failed",
-      "title": "Failed to start gdrive-mount.service",
-      "severity": "Error",
-      "count": 3,
-      "impact": -10.9
     }
   ],
   "resources": {
     "cpu_usage": 0.5,
+    "cpu_penalty": 0.0,
     "cpu_status": "Healthy",
     "memory_usage": 6.0,
+    "memory_penalty": 0.0,
     "memory_status": "Healthy",
     "disk_usage": 0.0,
+    "disk_penalty": 0.0,
     "disk_status": "Healthy",
     "load_average": 0.20,
+    "load_penalty": 0.0,
     "load_status": "Healthy",
     "resource_impact": 0.0,
     "resource_hog_count": 0,
@@ -232,95 +187,59 @@ curl http://localhost:8080/health | jq
 }
 ```
 
+## TUI Display Format
+
+```
+┌─Health Score──────────────────────────────────────────┐
+│ Health Score: 31.3/100 (poor)                         │
+└───────────────────────────────────────────────────────┘
+┌─Issues────────────────────────────────────────────────┐
+│   5× [ERR] kernel: misc dxg error                     │
+│   3× [ERR] Failed to start gdrive-mount.service       │
+│   2× [WARN] NetworkManager: DNS configuration issue   │
+└───────────────────────────────────────────────────────┘
+CPU 0.5%  |  MEM 6.0%  |  DISK 0.0%  |  LOAD 0.20
+```
+
 ## Health Score Algorithm
 
-**Formula**:
+Vitals uses the **Temporal Weighted Health Score (TWHS)** algorithm:
+
 ```
-score = 100 - (issue_penalties + resource_penalties)
-smoothed_score = EWMA(score, alpha=0.3)
-```
+score = 100 × exp(-T / κ)
 
-**Issue Penalties**:
-- Error: `-10 × ln(count)`
-- Warning: `-3 × ln(count)`
-- Info: `-1 × ln(count)`
-
-**Resource Penalties**:
-- Warning status: `-2 per resource`
-- Critical status: `-8 per resource`
-- Applied to: CPU, memory, disk, load average
-
-**Thresholds**:
-- 90-100: Excellent (green)
-- 75-89: Good (green)
-- 50-74: Fair (yellow)
-- 25-49: Poor (yellow)
-- 0-24: Critical (red)
-
-## Usage
-
-### Build All Components
-
-```bash
-# From workspace root
-cargo build --release
+where T = Σ [w(sev) × frecency × (1 - cascade)] + Σ [α_j × R_j(u_j)]
 ```
 
-### Start Daemon
+- **Time decay**: Recent issues weigh more than old ones (configurable half-life, default 6h)
+- **Cascade attribution**: If `NetworkManager` fails and 9 dependents fail, the 9 downstream failures are attributed to `NetworkManager`
+- **Baseline-relative resources**: A gaming desktop at 85% CPU scores differently than a database server at 85%
 
-```bash
-# From workspace root
-cargo run --release --bin vitals-daemon
-# Listens on http://localhost:8080
+**Thresholds**: 90-100 excellent · 75-89 good · 50-74 fair · 25-49 poor · 0-24 critical
 
-# Or from daemon directory
-cd daemon
-cargo run --release
-```
-
-### Run TUI
-
-```bash
-# From workspace root
-cargo run --release --bin vitals-tui -- --daemon-url http://localhost:8080
-
-# Or from tui directory
-cd tui
-cargo run --release -- --daemon-url http://localhost:8080
-# Press 'q' to quit
-```
-
-### Query API
-
-```bash
-# Health endpoint
-curl http://localhost:8080/health | jq '.score'
-
-# Prometheus metrics
-curl http://localhost:8080/metrics
-```
+See `scorer/` for the full algorithm implementation.
 
 ## Configuration
 
-Daemon config: `~/.config/vitals/daemon.toml`
+Daemon config: `~/.config/vitals/config.toml`
 
 ```toml
 [daemon]
 host = "127.0.0.1"
 port = 8080
-calculation_interval = 10
+calculation_interval = 30
 
-[health]
-ewma_window = 10
-ewma_alpha = 0.3
-error_weight = 10.0
-warning_weight = 3.0
-info_weight = 1.0
+[twhs]
+decay_half_life_hours = 6.0
+sensitivity = 100.0
 
-[health.resource_thresholds]
-cpu_warning_threshold = 80.0
-memory_warning_threshold = 85.0
-enable_resource_monitoring = true
+[twhs.resources]
+r_max = 20.0
+steepness = 0.5
+
+[notifier]
+alert_below = 75.0
+cooldown_secs = 1800
 ```
 
 TUI options:
@@ -329,141 +248,23 @@ TUI options:
 vitals-tui --daemon-url http://localhost:8080 --refresh 5
 ```
 
-## Next Steps
-
-### Immediate
-
-1. Fix daemon build (systemd dependencies)
-2. Test full integration (daemon + TUI)
-3. Add `/logs` endpoint implementation
-
-### Future Features
-
-- **Filtering**: By service, severity, time range
-- **Search**: Regex search through logs
-- **Drill-down**: Press Enter to expand issue details
-- **Help overlay**: Press `?` for keyboard shortcuts
-- **Configuration**: TUI config file
-- **Performance**: Caching, pagination for large datasets
-
-## Repository Structure
-
-```
-vitals/                     # Cargo workspace root
-├── Cargo.toml                   # Workspace configuration
-├── README.md                    # This file
-│
-├── core/                        # vitals-core crate
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── issue.rs
-│       ├── health.rs
-│       └── api.rs
-│
-├── daemon/                      # vitals-daemon crate
-│   ├── Cargo.toml
-│   ├── README.md
-│   └── src/
-│       ├── lib.rs
-│       ├── health.rs
-│       ├── agg/
-│       ├── data/
-│       └── bin/daemon.rs
-│
-├── tui/                         # vitals-tui crate
-│   ├── Cargo.toml
-│   ├── README.md
-│   └── src/
-│       ├── main.rs
-│       ├── client.rs
-│       └── ui.rs
-│
-└── backup/                      # Legacy monorepo (archived)
-    └── ...
-```
-
 ## Development
 
-### Workspace Commands
-
 ```bash
-# Build all crates
-cargo build --workspace
+# Enter dev shell (provides all tools and aliases)
+nix develop
 
-# Test all crates
-cargo test --workspace
-
-# Run specific binary
-cargo run --bin vitals-daemon
-cargo run --bin vitals-tui
-
-# Check all crates
-cargo check --workspace
-
-# Format code
-cargo fmt --all
-
-# Lint with clippy
-cargo clippy --workspace --all-targets
+# Aliases available in dev shell:
+test            # Run all workspace tests
+test:daemon     # Test daemon only
+test:tui        # Test TUI only
+format          # Format all code
+lint            # Run clippy
+run:daemon      # Start daemon
+run:tui         # Start TUI (connects to daemon)
+watch:daemon    # Watch and auto-restart daemon
+watch:tui       # Watch and auto-restart TUI
+build           # Nix build
+build:daemon    # Nix build daemon only
+build:tui       # Nix build TUI only
 ```
-
-### Publishing to crates.io
-
-Each crate can be published independently:
-
-```bash
-# Publish core first (no dependencies)
-cd core && cargo publish
-
-# Then daemon (depends on core)
-cd daemon && cargo publish
-
-# Finally tui (depends on core)
-cd tui && cargo publish
-```
-
-## CI/CD Pipeline
-
-The project uses a hybrid CI/CD approach with Garnix and GitHub Actions.
-
-### Garnix CI (Primary Build System)
-
-Garnix handles heavy Rust compilation with centralized signing for enhanced security:
-- Daemon and TUI package builds (x86_64-linux, aarch64-linux)
-- Systemd service package builds
-- Full workspace integration tests
-
-Configuration: `garnix.yaml`
-
-Setup: Install Garnix GitHub App at https://garnix.io (one-time manual setup)
-
-### GitHub Actions (Validation & Security)
-
-GitHub Actions handles lightweight validation and security scanning:
-- Security scans (Trivy vulnerability scanner, cargo audit)
-- Pre-commit hooks validation (prek)
-- Code quality checks (rustfmt, clippy)
-- Workspace structure validation
-
-Configuration: `.github/workflows/ci.yml`
-
-### Binary Caches
-
-Multiple caches configured with priority-based fallback in `flake.nix`:
-- cache.nixos.org - Official NixOS cache
-- nix-community.cachix.org - Community packages
-- cache.garnix.io - Garnix CI builds with centralized signing
-
-Garnix cache uses centralized signing, reducing cache poisoning risks compared to traditional binary caches where multiple contributors have push access. This provides better security for Rust dependency compilation.
-
-## Summary
-
-This Cargo workspace successfully organizes the vitals project:
-
-✅ **Unified repository** - Single git clone, unified CI/CD
-✅ **Clean separation** - Three focused crates with clear responsibilities
-✅ **Shared dependencies** - Consistent versions across all components
-✅ **Independent binaries** - `vitals-daemon` and `vitals-tui`
-
-The architecture follows Rust best practices and Unix principles, providing clean APIs and enabling future expansion.

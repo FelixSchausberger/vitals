@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../README.md"
 description = "CLI client for the vitals health monitoring daemon"
 keywords = ["monitoring", "health", "cli", "systemd"]
 categories = ["command-line-utilities"]
@@ -16,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared core models
-vitals-core = { path = "../core" }
+vitals-core = { path = "../core", version = "0.1.0" }
 
 # Serialization
 serde.workspace = true

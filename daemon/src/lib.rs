@@ -15,6 +15,8 @@ pub mod config;
 pub mod data;
 pub mod health;
 pub mod history;
+/// Log entry collection and querying for the `/logs` endpoint
+pub mod logs;
 /// Legacy model module for compatibility
 pub mod model;
 pub mod notifier;

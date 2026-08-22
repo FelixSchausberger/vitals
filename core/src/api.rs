@@ -97,6 +97,53 @@ pub struct TopConsumer {
     pub impact_score: f64,
 }
 
+/// Severity filter values accepted as a `/logs` query parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeverityFilter {
+    /// Priority 0-3 entries
+    Error,
+    /// Priority 4 entries
+    Warning,
+    /// Priority 5-7 entries
+    Info,
+}
+
+impl From<SeverityFilter> for Severity {
+    fn from(filter: SeverityFilter) -> Self {
+        match filter {
+            SeverityFilter::Error => Self::Error,
+            SeverityFilter::Warning => Self::Warning,
+            SeverityFilter::Info => Self::Info,
+        }
+    }
+}
+
+/// Query parameters for the `/logs` endpoint.
+///
+/// All fields are optional; omitted fields do not constrain the result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogsQuery {
+    /// Only return entries with this severity
+    #[serde(default)]
+    pub severity: Option<SeverityFilter>,
+    /// Only return entries from this systemd unit (exact match)
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Only return entries at or after this time (RFC 3339)
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub since: Option<OffsetDateTime>,
+    /// Only return entries at or before this time (RFC 3339)
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub until: Option<OffsetDateTime>,
+    /// Maximum number of entries to return (after `offset`)
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of matching entries to skip before returning (for pagination)
+    #[serde(default)]
+    pub offset: usize,
+}
+
 /// Response from /logs endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsResponse {

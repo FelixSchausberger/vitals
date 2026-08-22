@@ -204,10 +204,9 @@ scrape_configs:
 Create `~/.config/vitals/config.toml`:
 
 ```toml
-[health]
-ewma_alpha = 0.3
+[twhs]
 error_weight = 10.0
-warning_weight = 3.0
+warning_weight = 3.162
 info_weight = 1.0
 
 [health.resource_thresholds]
@@ -242,7 +241,7 @@ The health score starts at 100 (perfect health) and deducts points for:
    - Critical resource usage: -8 points per resource
    - Warning resource usage: -2 points per resource
 
-3. **EWMA Smoothing**: Smooths score over time to avoid spikes
+3. **Temporal weighting**: Recent events weigh more than old ones (exponential decay)
 
 **Status Levels**:
 - 90-100: Excellent (green)

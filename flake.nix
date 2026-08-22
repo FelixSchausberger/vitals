@@ -5,12 +5,12 @@
     extra-substituters = [
       "https://cache.nixos.org"
       "https://nix-community.cachix.org"
-      "https://cache.garnix.io"
+      "https://felixschausberger.cachix.org"
     ];
     extra-trusted-public-keys = [
       "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
       "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
-      "cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g="
+      "felixschausberger.cachix.org-1:vCZvKWZ13V7CxC7HjRPqZJTwcKLJaaxYnfQsUIkDFaE="
     ];
   };
 
@@ -32,6 +32,8 @@
         inputs.treefmt-nix.flakeModule
       ];
 
+      flake.nixosModules.default = import ./nix/vitals.nix inputs;
+
       perSystem =
         { config
         , pkgs
@@ -52,11 +54,6 @@
             # System libraries for systemd/journald integration
             pkg-config
             systemd
-            # Additional dependencies for TUI
-            fontconfig
-            freetype
-            # For HTTP/SSL support
-            openssl
           ];
 
           # Runtime dependencies (available in PATH)
@@ -81,7 +78,7 @@
             ];
 
             # For systemd integration
-            PKG_CONFIG_PATH = "${pkgs.systemd.dev}/lib/pkgconfig:${pkgs.openssl.dev}/lib/pkgconfig";
+            PKG_CONFIG_PATH = "${pkgs.systemd.dev}/lib/pkgconfig";
             SYSTEMD_LIB_DIR = "${pkgs.systemd}/lib";
             SYSTEMD_LIBS = "systemd";
           };
@@ -327,6 +324,11 @@
               };
             };
           };
+
+          # NixOS VM integration test
+          checks.vitals-vm = pkgs.testers.runNixOSTest (
+            import ./nix/tests/vitals-vm.nix { inherit inputs; }
+          );
         };
     };
 }

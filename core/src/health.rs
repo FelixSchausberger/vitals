@@ -12,7 +12,12 @@ use crate::issue::Severity;
 pub struct HealthBreakdown {
     /// Overall health score (0-100)
     pub overall_score: f64,
-    /// EWMA smoothed score (0-100)
+    /// Current health score (0-100). Identical to `overall_score`.
+    ///
+    /// Historical note: this field was originally intended for EWMA smoothing,
+    /// but temporal weighting is now handled at the scorer algorithm level
+    /// (frecency decay with configurable half-life). No additional smoothing
+    /// is applied here.
     pub smoothed_score: f64,
     /// Number of error-level issues
     pub error_count: usize,

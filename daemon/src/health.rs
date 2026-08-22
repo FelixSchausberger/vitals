@@ -20,7 +20,9 @@ use crate::{
 
 /// Scorer-based health calculator.
 ///
-/// Replaces the old `HealthCalculator` (EWMA + linear penalties). This wrapper
+/// Scorer-based health calculator using TWHS (Temporal Weighted Health Score).
+///
+/// This wrapper
 /// converts daemon `Issue` slices into `scorer::Event`s, calls `scorer::compute()`,
 /// and adapts the result to the shared `HealthBreakdown` type used by the HTTP API
 /// and output formatters.

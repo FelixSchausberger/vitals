@@ -6,6 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../README.md"
 description = "Terminal UI for vitals system monitoring"
 keywords = ["tui", "monitoring", "systemd", "journald"]
 categories = ["command-line-utilities"]
@@ -16,10 +17,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared core models
-vitals-core = { path = "../core" }
+vitals-core = { path = "../core", version = "0.1.0" }
 
 # TUI framework
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = [
+  "crossterm_0_28",
+] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # HTTP client for daemon API (using rustls to avoid OpenSSL dependency)
@@ -40,14 +43,25 @@ http-body-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Time formatting for log timestamps
+time.workspace = true
+
+# Query string encoding for /logs parameters
+url = "2"
+
+# Client-side regex search
+regex = "1.10"
+
+# Config file (~/.config/vitals/tui.toml)
+dirs = "5"
+toml = "0.8"
+
 # Error handling
 anyhow.workspace = true
 
 # CLI parsing
 clap.workspace = true
 
-# Check if stdout is a TTY
-atty = "0.2"
 
 [lints]
 workspace = true

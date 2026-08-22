@@ -132,11 +132,9 @@ host = "127.0.0.1"
 port = 8080
 calculation_interval = 10
 
-[health]
-ewma_window = 10
-ewma_alpha = 0.3
+[twhs]
 error_weight = 10.0
-warning_weight = 3.0
+warning_weight = 3.162
 info_weight = 1.0
 
 [health.resource_thresholds]
