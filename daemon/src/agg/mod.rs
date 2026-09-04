@@ -29,6 +29,52 @@ const BOOT_NOISE_PATTERNS: &[&str] = &[
     "spi-nor ",
 ];
 
+/// Markers identifying a clean shutdown/reboot sequence. Suppression of
+/// shutdown fallout is gated on one of these appearing in the same journal
+/// window, so identical messages from a real crash are still scored.
+const SHUTDOWN_MARKER_PATTERNS: &[&str] = &[
+    "Shutting down",
+    "Starting reboot",
+    "systemd-shutdown",
+    "target shutdown",
+    "target Shutdown",
+    "System Shutdown",
+    "target reboot",
+    "target Reboot",
+    "reboot:",
+];
+
+/// Journal messages that are expected fallout of a clean shutdown/reboot
+/// (graceful SIGTERM teardown, resolver losing its local upstream, Redis
+/// exit notice, units killed by the shutdown transaction). Only suppressed
+/// near a shutdown marker; elsewhere they score normally.
+const SHUTDOWN_TRANSIENT_PATTERNS: &[&str] = &[
+    "Got sig[15] terminate",
+    "SIGTERM",
+    "killed by signal 15",
+    "Using degraded feature set UDP instead of TCP",
+    "ready to exit, bye bye",
+    "Failed with result 'exit-code'",
+];
+
+fn default_shutdown_grace_secs() -> i64 {
+    120
+}
+
+fn default_shutdown_markers() -> Vec<String> {
+    SHUTDOWN_MARKER_PATTERNS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn default_shutdown_transient_patterns() -> Vec<String> {
+    SHUTDOWN_TRANSIENT_PATTERNS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// Errors that can occur during issue aggregation.
 #[derive(Error, Debug)]
 #[allow(dead_code)]
@@ -57,6 +103,18 @@ pub struct AggregationConfig {
     pub correlation_threshold: f64,
     /// Maximum number of issues to correlate together
     pub max_correlation_group_size: usize,
+    /// Grace window around detected shutdown/reboot markers in seconds.
+    /// Shutdown-transient entries inside this window are dropped before
+    /// scoring. Zero disables the suppression.
+    #[serde(default = "default_shutdown_grace_secs")]
+    pub shutdown_grace_secs: i64,
+    /// Message patterns identifying a clean shutdown/reboot sequence.
+    #[serde(default = "default_shutdown_markers")]
+    pub shutdown_markers: Vec<String>,
+    /// Message patterns treated as shutdown fallout. Only suppressed near
+    /// a shutdown marker; identical messages elsewhere score normally.
+    #[serde(default = "default_shutdown_transient_patterns")]
+    pub shutdown_transient_patterns: Vec<String>,
 }
 
 impl Default for AggregationConfig {
@@ -68,6 +126,9 @@ impl Default for AggregationConfig {
             enable_correlation: true,
             correlation_threshold: 0.7,
             max_correlation_group_size: 5,
+            shutdown_grace_secs: default_shutdown_grace_secs(),
+            shutdown_markers: default_shutdown_markers(),
+            shutdown_transient_patterns: default_shutdown_transient_patterns(),
         }
     }
 }
@@ -116,9 +177,16 @@ pub fn aggregate_issues_with_config(
 
     // Drop known one-time boot noise that is not actionable and otherwise
     // dominates score impact after each reboot.
+    // Drop clean-shutdown fallout (SIGTERM teardown, resolver losing its
+    // local upstream, Redis exit notices) when a shutdown/reboot marker is
+    // present in the same window. Entries stay visible via /logs; they just
+    // don't become scored issues.
+    let marker_times = shutdown_marker_times(journal_entries, config);
     let filtered_entries: Vec<JournalEntry> = journal_entries
         .iter()
-        .filter(|entry| !is_boot_noise(entry))
+        .filter(|entry| {
+            !is_boot_noise(entry) && !is_shutdown_transient(entry, &marker_times, config)
+        })
         .cloned()
         .collect();
 
@@ -230,6 +298,47 @@ fn is_boot_noise(entry: &JournalEntry) -> bool {
     BOOT_NOISE_PATTERNS
         .iter()
         .any(|pattern| entry.message.contains(pattern))
+}
+
+/// Collect timestamps of clean shutdown/reboot markers in this window.
+fn shutdown_marker_times(
+    entries: &[JournalEntry],
+    config: &AggregationConfig,
+) -> Vec<OffsetDateTime> {
+    entries
+        .iter()
+        .filter(|entry| {
+            config
+                .shutdown_markers
+                .iter()
+                .any(|marker| entry.message.contains(marker))
+        })
+        .map(|entry| entry.timestamp)
+        .collect()
+}
+
+/// Return true if this entry is expected fallout of a clean shutdown/reboot:
+/// it matches a transient pattern and falls within the grace window of a
+/// detected shutdown marker. Identical messages without a nearby marker
+/// (i.e. a real crash) score normally.
+fn is_shutdown_transient(
+    entry: &JournalEntry,
+    marker_times: &[OffsetDateTime],
+    config: &AggregationConfig,
+) -> bool {
+    if config.shutdown_grace_secs <= 0 {
+        return false;
+    }
+    if !config
+        .shutdown_transient_patterns
+        .iter()
+        .any(|pattern| entry.message.contains(pattern))
+    {
+        return false;
+    }
+    marker_times.iter().any(|marker| {
+        (*marker - entry.timestamp).whole_seconds().abs() <= config.shutdown_grace_secs
+    })
 }
 
 /// Infer a stable source key from a journal message when unit/PID mapping is unavailable.
@@ -1078,5 +1187,144 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].unit.as_deref(), Some("example.service"));
         assert_eq!(issues[0].count, 1);
+    }
+
+    /// Shutdown fallout clustered around a reboot marker must not score.
+    /// Mirrors the m920q report: samba SIGTERM, resolved degraded-UDP, and
+    /// Redis exit notices all sharing one shutdown second.
+    #[test]
+    fn test_shutdown_transients_suppressed_near_marker() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 3,
+                message: "Got sig[15] terminate (is_parent=0)".to_string(),
+                unit: Some("samba-winbindd.service".to_string()),
+                pid: Some(101),
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 4,
+                message: "Using degraded feature set UDP instead of TCP for DNS server 127.0.0.1."
+                    .to_string(),
+                unit: Some("systemd-resolved.service".to_string()),
+                pid: Some(102),
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 4,
+                message: "Redis is now ready to exit, bye bye...".to_string(),
+                unit: Some("redis-immich.service".to_string()),
+                pid: Some(103),
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:40 UTC),
+                priority: 6,
+                message: "Reached target System Shutdown.".to_string(),
+                unit: None,
+                pid: None,
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert!(issues.is_empty());
+    }
+
+    /// Identical messages without any shutdown marker are real failures and
+    /// must keep scoring.
+    #[test]
+    fn test_shutdown_transients_kept_without_marker() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 3,
+                message: "Got sig[15] terminate (is_parent=0)".to_string(),
+                unit: Some("samba-winbindd.service".to_string()),
+                pid: Some(101),
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 4,
+                message: "Using degraded feature set UDP instead of TCP for DNS server 127.0.0.1."
+                    .to_string(),
+                unit: Some("systemd-resolved.service".to_string()),
+                pid: Some(102),
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|issue| issue.severity == Severity::Error));
+    }
+
+    /// An exit-code failure far outside the grace window is not shutdown
+    /// fallout, even when a marker exists elsewhere in the window.
+    #[test]
+    fn test_exit_code_kept_outside_grace_window() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:00:00 UTC),
+                priority: 6,
+                message: "Reached target System Shutdown.".to_string(),
+                unit: None,
+                pid: None,
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 12:00:00 UTC),
+                priority: 3,
+                message: "homepage-dashboard.service: Failed with result 'exit-code'.".to_string(),
+                unit: Some("homepage-dashboard.service".to_string()),
+                pid: Some(104),
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, Severity::Error);
+    }
+
+    /// Zero grace disables the suppression entirely.
+    #[test]
+    fn test_shutdown_suppression_disabled_by_zero_grace() {
+        let entries = vec![
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:39 UTC),
+                priority: 3,
+                message: "Got sig[15] terminate (is_parent=0)".to_string(),
+                unit: Some("samba-winbindd.service".to_string()),
+                pid: Some(101),
+            },
+            JournalEntry {
+                timestamp: datetime!(2026-09-04 07:32:40 UTC),
+                priority: 6,
+                message: "Reached target System Shutdown.".to_string(),
+                unit: None,
+                pid: None,
+            },
+        ];
+
+        let config = AggregationConfig {
+            enable_correlation: false,
+            shutdown_grace_secs: 0,
+            ..Default::default()
+        };
+
+        let issues = aggregate_issues_with_config(&entries, &[], &config);
+        assert_eq!(issues.len(), 1);
     }
 }
