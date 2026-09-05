@@ -25,10 +25,14 @@ use crate::data::traits::{JournalEntry, JournalReader};
 ///
 /// After the first read, internal state is maintained so that subsequent reads
 /// only return entries that arrived since the last call (incremental mode).
+/// Position is tracked with opaque sd-journal cursors rather than timestamps:
+/// cursors survive rotation/vacuum and advance past records whose timestamps
+/// cannot be parsed, so one malformed record can never wedge the reader into
+/// re-reporting the same slice forever.
 pub struct SystemdJournalReader {
-    /// Microseconds-since-epoch timestamp of the last entry we read.
+    /// Opaque cursor of the last entry returned to the caller.
     /// `None` means no prior read — fall back to the caller's `since` window.
-    last_read_usec: Mutex<Option<u64>>,
+    last_cursor: Mutex<Option<String>>,
 }
 
 impl SystemdJournalReader {
@@ -45,7 +49,7 @@ impl SystemdJournalReader {
             .map_err(|e| anyhow!("Failed to open systemd journal: {e}"))?;
 
         Ok(Self {
-            last_read_usec: Mutex::new(None),
+            last_cursor: Mutex::new(None),
         })
     }
 
@@ -63,22 +67,23 @@ impl SystemdJournalReader {
             .map_err(|e| anyhow!("Failed to open systemd journal: {e}"))?;
 
         Ok(Self {
-            last_read_usec: Mutex::new(None),
+            last_cursor: Mutex::new(None),
         })
     }
 
     /// Convert a `JournalRecord` to our `JournalEntry` format.
+    ///
+    /// Returns `None` for records without a usable `__REALTIME_TIMESTAMP` —
+    /// the caller skips them. Stamping such records with the current time
+    /// instead would resurrect stale entries as current issues on every tick
+    /// (and stall the incremental cursor, re-reporting the same slice
+    /// forever), so failing closed here is load-bearing.
     #[allow(clippy::cast_possible_wrap)]
-    fn record_to_entry(record: &JournalRecord) -> Result<JournalEntry> {
-        let timestamp = if let Some(realtime) = record.get("__REALTIME_TIMESTAMP") {
-            let microseconds: u64 = realtime
-                .parse()
-                .map_err(|_| anyhow!("Invalid timestamp format"))?;
-            let system_time = UNIX_EPOCH + std::time::Duration::from_micros(microseconds);
-            OffsetDateTime::from(system_time)
-        } else {
-            OffsetDateTime::now_utc()
-        };
+    fn record_to_entry(record: &JournalRecord) -> Option<JournalEntry> {
+        let realtime = record.get("__REALTIME_TIMESTAMP")?;
+        let microseconds = realtime.parse::<u64>().ok()?;
+        let system_time = UNIX_EPOCH + std::time::Duration::from_micros(microseconds);
+        let timestamp = OffsetDateTime::from(system_time);
 
         let priority: u8 = record
             .get("PRIORITY")
@@ -92,20 +97,13 @@ impl SystemdJournalReader {
         let unit = record.get("_SYSTEMD_UNIT").cloned();
         let pid = record.get("_PID").and_then(|p| p.parse().ok());
 
-        Ok(JournalEntry {
+        Some(JournalEntry {
             timestamp,
             priority,
             message,
             unit,
             pid,
         })
-    }
-
-    /// Parse `__REALTIME_TIMESTAMP` from a record into microseconds.
-    fn record_usec(record: &JournalRecord) -> Option<u64> {
-        record
-            .get("__REALTIME_TIMESTAMP")
-            .and_then(|s| s.parse().ok())
     }
 }
 
@@ -127,41 +125,50 @@ impl JournalReader for SystemdJournalReader {
             .map_err(|e| anyhow!("Failed to open systemd journal: {e}"))?;
 
         // Choose seek strategy:
-        //   1. If we have a previous read position, seek to just past it (incremental).
+        //   1. If we have a previous read position, seek to it by opaque
+        //      cursor and skip past it (incremental).
         //   2. Otherwise use the caller's `since` time (initial / reset read).
         //   3. If neither, seek to tail and walk backwards.
-        let prior_usec = *self.last_read_usec.lock().unwrap();
+        let prior_cursor = self.last_cursor.lock().unwrap().clone();
+        let mut skip_first = false;
 
-        if let Some(usec) = prior_usec {
-            // +1 μs ensures we don't re-read the last entry
-            journal
-                .seek_realtime_usec(usec + 1)
-                .map_err(|e| anyhow!("Failed to seek to last-read position: {e}"))?;
-        } else if let Some(since_time) = since {
-            let system_time: SystemTime = since_time.into();
-            #[allow(clippy::cast_possible_truncation)]
-            let since_micros = system_time
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| anyhow!("Invalid since timestamp"))?
-                .as_micros() as u64;
+        if let Some(cursor) = prior_cursor.as_deref() {
+            // seek_cursor positions AT the saved entry; the first record
+            // read is it, so skip exactly one entry below. (Verified by
+            // comparing cursors rather than assuming seek/next semantics.)
+            // A failed seek means the saved entry was vacuumed/rotated
+            // away — fall through to the time-window read instead of
+            // erroring the tick.
+            skip_first = journal.seek_cursor(cursor).is_ok();
+        }
+        if !skip_first {
+            if let Some(since_time) = since {
+                let system_time: SystemTime = since_time.into();
+                #[allow(clippy::cast_possible_truncation)]
+                let since_micros = system_time
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| anyhow!("Invalid since timestamp"))?
+                    .as_micros() as u64;
 
-            journal
-                .seek_realtime_usec(since_micros)
-                .map_err(|e| anyhow!("Failed to seek journal to timestamp: {e}"))?;
-        } else {
-            journal
-                .seek(JournalSeek::Tail)
-                .map_err(|e| anyhow!("Failed to seek to journal tail: {e}"))?;
+                journal
+                    .seek_realtime_usec(since_micros)
+                    .map_err(|e| anyhow!("Failed to seek journal to timestamp: {e}"))?;
+            } else {
+                journal
+                    .seek(JournalSeek::Tail)
+                    .map_err(|e| anyhow!("Failed to seek to journal tail: {e}"))?;
 
-            for _ in 0..limit {
-                if journal.previous().is_err() {
-                    break;
+                for _ in 0..limit {
+                    if journal.previous().is_err() {
+                        break;
+                    }
                 }
             }
         }
 
         let mut entries = Vec::new();
-        let mut max_usec = prior_usec.unwrap_or(0);
+        let mut skipped_no_timestamp: u64 = 0;
+        let mut new_cursor: Option<String> = None;
 
         loop {
             if entries.len() >= limit {
@@ -170,14 +177,24 @@ impl JournalReader for SystemdJournalReader {
 
             match journal.next_entry() {
                 Ok(Some(record)) => {
-                    // Track the latest timestamp so the next call can seek past it
-                    if let Some(ts) = Self::record_usec(&record) {
-                        if ts > max_usec {
-                            max_usec = ts;
+                    // Advance the cursor past every record successfully read —
+                    // including ones skipped below — so a malformed record can
+                    // never pin the reader to the same slice.
+                    if let Ok(cursor) = journal.cursor() {
+                        if skip_first {
+                            skip_first = false;
+                            // Skip the entry already returned last time; if it
+                            // is already gone, this record is new — keep it.
+                            if Some(cursor.as_str()) == prior_cursor.as_deref() {
+                                new_cursor = Some(cursor);
+                                continue;
+                            }
                         }
+                        new_cursor = Some(cursor);
                     }
-                    if let Ok(entry) = Self::record_to_entry(&record) {
-                        entries.push(entry);
+                    match Self::record_to_entry(&record) {
+                        Some(entry) => entries.push(entry),
+                        None => skipped_no_timestamp += 1,
                     }
                 }
                 Ok(None) => break,
@@ -188,9 +205,16 @@ impl JournalReader for SystemdJournalReader {
             }
         }
 
-        // Persist cursor for incremental reads — only advance, never go back
-        if max_usec > prior_usec.unwrap_or(0) {
-            *self.last_read_usec.lock().unwrap() = Some(max_usec);
+        // Persist cursor for incremental reads. Stored even when zero entries
+        // converted: the read position moved regardless.
+        if let Some(cursor) = new_cursor {
+            *self.last_cursor.lock().unwrap() = Some(cursor);
+        }
+
+        if skipped_no_timestamp > 0 {
+            eprintln!(
+                "vitals journal reader: skipped {skipped_no_timestamp} record(s) without usable timestamps"
+            );
         }
 
         // Most-recent-first for the caller
@@ -231,7 +255,7 @@ impl JournalReader for SystemdJournalReader {
 
             match journal.next_entry() {
                 Ok(Some(record)) => {
-                    if let Ok(entry) = Self::record_to_entry(&record) {
+                    if let Some(entry) = Self::record_to_entry(&record) {
                         entries.push(entry);
                     }
                 }
@@ -349,5 +373,77 @@ mod tests {
                 assert_eq!(unit, "systemd-journald.service");
             }
         }
+    }
+
+    fn test_record(pairs: &[(&str, &str)]) -> JournalRecord {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_record_without_timestamp_is_skipped_not_restamped() {
+        // Regression test: records lacking __REALTIME_TIMESTAMP must NOT be
+        // stamped with the current time — that resurrects stale entries as
+        // current issues on every tick and stalls the incremental cursor.
+        let record = test_record(&[
+            (
+                "MESSAGE",
+                "comin-autopush.service: Failed with result 'exit-code'.",
+            ),
+            ("PRIORITY", "4"),
+        ]);
+
+        let result = SystemdJournalReader::record_to_entry(&record);
+        assert!(
+            result.is_none(),
+            "timestamp-less record must be skipped, not restamped"
+        );
+    }
+
+    #[test]
+    fn test_record_with_unparsable_timestamp_is_skipped() {
+        let record = test_record(&[
+            ("__REALTIME_TIMESTAMP", "not-a-number"),
+            ("MESSAGE", "boom"),
+            ("PRIORITY", "3"),
+        ]);
+
+        let result = SystemdJournalReader::record_to_entry(&record);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::unreadable_literal)]
+    fn test_record_with_valid_fields_converts() {
+        let record = test_record(&[
+            ("__REALTIME_TIMESTAMP", "1788522330387455"),
+            ("MESSAGE", "hello"),
+            ("PRIORITY", "4"),
+            ("_SYSTEMD_UNIT", "foo.service"),
+            ("_PID", "1234"),
+        ]);
+
+        let entry =
+            SystemdJournalReader::record_to_entry(&record).expect("valid record must convert");
+        assert_eq!(entry.message, "hello");
+        assert_eq!(entry.priority, 4);
+        assert_eq!(entry.unit.as_deref(), Some("foo.service"));
+        assert_eq!(entry.pid, Some(1234));
+        assert_eq!(entry.timestamp.unix_timestamp(), 1788522330);
+    }
+
+    #[test]
+    #[allow(clippy::unreadable_literal)]
+    fn test_record_missing_optional_fields_uses_defaults() {
+        let record = test_record(&[("__REALTIME_TIMESTAMP", "1788522330387455")]);
+
+        let entry = SystemdJournalReader::record_to_entry(&record)
+            .expect("record with only a timestamp must convert");
+        assert_eq!(entry.message, "(no message)");
+        assert_eq!(entry.priority, 6);
+        assert_eq!(entry.unit, None);
+        assert_eq!(entry.pid, None);
     }
 }
