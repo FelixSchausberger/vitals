@@ -62,7 +62,7 @@ fi
 # Check required directories
 echo
 echo "📂 Directory Check:"
-for dir in "/etc/vitals" "/var/log/vitals" "/var/lib/vitals"; do
+for dir in "/var/lib/vitals" "/var/lib/vitals/.config/vitals" "/run/vitals"; do
     if [ -d "$dir" ]; then
         echo "✅ $dir exists"
         # Check ownership and permissions

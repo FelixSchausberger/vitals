@@ -8,7 +8,6 @@ After=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/vitals-daemon --mode live
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
@@ -16,11 +15,17 @@ TimeoutStopSec=20
 # Security hardening
 User=vitals
 Group=vitals
+# Socket at /run/vitals/daemon.sock (RuntimeDirectory= is exempt from
+# ProtectSystem=strict, so it needs no ReadWritePaths= entry). The daemon has
+# no SIGHUP handler, so there is deliberately no ExecReload=.
+RuntimeDirectory=vitals
+Environment=XDG_RUNTIME_DIR=/run
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/etc/vitals /var/log/vitals /var/lib/vitals
+# Score history and config live under the service user's home.
+ReadWritePaths=/var/lib/vitals
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

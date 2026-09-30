@@ -14,6 +14,9 @@ result-*
 # direnv
 .direnv/
 
+# Local audit reports and plans (repo-audit skill)
+.opencode/
+
 # Editor and IDE files
 .vscode/*
 !.vscode/settings.json

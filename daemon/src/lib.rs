@@ -11,7 +11,7 @@ pub use vitals_core::{
 
 pub mod agg;
 pub mod config;
-/// Data collection and streaming modules for systemd, journald, and metrics
+/// Data collection modules for systemd, journald, and metrics
 pub mod data;
 pub mod health;
 pub mod history;

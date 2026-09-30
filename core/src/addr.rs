@@ -6,16 +6,65 @@ pub enum DaemonAddr {
     Tcp { url: String },
 }
 
-/// Resolve the daemon address with the following priority:
-/// 1. Unix socket at `$XDG_RUNTIME_DIR/vitals/daemon.sock` (primary transport)
-/// 2. `VITALS_URL` env var (backward compat for TCP setups)
-/// 3. Port file at `$XDG_STATE_HOME/vitals/addr` (written by daemon)
-/// 4. Default `http://127.0.0.1:8080`
+/// Canonical Unix socket path a vitals daemon binds to.
+///
+/// `$XDG_RUNTIME_DIR/vitals/daemon.sock` — i.e. `/run/vitals/daemon.sock` for a
+/// system service (the NixOS module sets `XDG_RUNTIME_DIR=/run` alongside
+/// `RuntimeDirectory=vitals`), `/run/user/<uid>/vitals/daemon.sock` for a
+/// per-user service, and `$TMPDIR/vitals/daemon.sock` when no runtime dir
+/// exists at all.
+#[must_use]
+pub fn daemon_socket_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("vitals").join("daemon.sock");
+        }
+    }
+
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.is_empty() {
+            return PathBuf::from(tmpdir).join("vitals").join("daemon.sock");
+        }
+    }
+
+    PathBuf::from("/tmp/vitals/daemon.sock")
+}
+
+/// Socket paths a client probes, most specific first.
+///
+/// A client never shares the environment of a *system* daemon, so its own
+/// `$XDG_RUNTIME_DIR` cannot reach `/run/vitals/daemon.sock`. The system path
+/// is therefore listed explicitly rather than derived from the environment.
+fn client_socket_candidates() -> Vec<PathBuf> {
+    let mut paths = vec![daemon_socket_path()];
+
+    let system = PathBuf::from("/run/vitals/daemon.sock");
+    if !paths.contains(&system) {
+        paths.push(system);
+    }
+
+    let shared = PathBuf::from("/tmp/vitals/daemon.sock");
+    if !paths.contains(&shared) {
+        paths.push(shared);
+    }
+
+    paths
+}
+
+/// Resolve the address a client should connect to.
+///
+/// 1. The first socket that actually accepts a connection. `exists()` is not
+///    enough: a crashed daemon leaves a stale socket behind, and a system
+///    daemon's socket is not writable by other users (`DynamicUser` + the
+///    service umask), so a probe rejects candidates this process cannot use.
+/// 2. `VITALS_URL`.
+/// 3. `http://127.0.0.1:8080`.
 #[must_use]
 pub fn resolve_daemon_addr() -> DaemonAddr {
-    let socket_path = daemon_socket_path();
-    if socket_path.exists() {
-        return DaemonAddr::Unix { path: socket_path };
+    for path in client_socket_candidates() {
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            return DaemonAddr::Unix { path };
+        }
     }
 
     if let Ok(url) = std::env::var("VITALS_URL") {
@@ -24,58 +73,7 @@ pub fn resolve_daemon_addr() -> DaemonAddr {
         }
     }
 
-    if let Some(port_file) = state_file_path() {
-        if let Ok(url) = std::fs::read_to_string(&port_file) {
-            let url = url.trim().to_string();
-            if !url.is_empty() {
-                return DaemonAddr::Tcp { url };
-            }
-        }
-    }
-
     DaemonAddr::Tcp {
         url: "http://127.0.0.1:8080".to_string(),
-    }
-}
-
-/// Standard Unix socket path for the vitals daemon.
-#[must_use]
-pub fn daemon_socket_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("vitals").join("daemon.sock")
-    } else if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        PathBuf::from(tmpdir).join("vitals").join("daemon.sock")
-    } else {
-        PathBuf::from("/tmp/vitals/daemon.sock")
-    }
-}
-
-fn state_file_path() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
-        Some(PathBuf::from(dir).join("vitals").join("addr"))
-    } else if let Ok(home) = std::env::var("HOME") {
-        Some(
-            PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("vitals")
-                .join("addr"),
-        )
-    } else {
-        None
-    }
-}
-
-/// Write the daemon address to a state file so the CLI can discover it.
-pub fn write_addr_file(addr: &DaemonAddr) {
-    let content = match addr {
-        DaemonAddr::Unix { path } => format!("unix:{}", path.display()),
-        DaemonAddr::Tcp { url } => url.clone(),
-    };
-    if let Some(path) = state_file_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, content);
     }
 }

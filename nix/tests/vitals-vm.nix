@@ -59,9 +59,10 @@ in
     assert "vitals_health_score" in metrics, f"Metrics missing expected metric: {metrics[:200]}"
 
     # 6. Primary transport: Unix socket serves the same API.
-    #    The daemon appends "vitals/daemon.sock" to $XDG_RUNTIME_DIR.
+    #    The daemon appends "daemon.sock" to $XDG_RUNTIME_DIR, which the module
+    #    points at /run so the socket lands inside RuntimeDirectory=vitals.
     sock_health = machine.succeed(
-      "curl -s --unix-socket /run/vitals/vitals/daemon.sock http://localhost/health | jq -r '.status'"
+      "curl -s --unix-socket /run/vitals/daemon.sock http://localhost/health | jq -r '.status'"
     )
     assert sock_health.strip() == health.strip(), \
       f"Unix socket health mismatch: tcp={health} unix={sock_health}"

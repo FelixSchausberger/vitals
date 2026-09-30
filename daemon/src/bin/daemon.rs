@@ -418,15 +418,39 @@ async fn run_daemon(config: Config, args: Args) -> Result<()> {
     // Create HTTP server
     let app = create_app(state.clone());
 
-    // Try Unix socket first, fall back to TCP with port fallback
-    match bind_unix_socket(&app).await {
-        Ok(()) => Ok(()),
-        Err(_) => bind_tcp_with_fallback(&app, &config).await,
-    }
+    // Primary transport: the Unix socket local clients auto-discover.
+    let unix_listener = unix_socket_listener()?;
+
+    // Secondary transport: TCP on the configured port (Prometheus, curl).
+    // A conflict is a startup failure, not a reason to hop to another port no
+    // client knows about.
+    let tcp_listener =
+        tokio::net::TcpListener::bind((config.daemon.host.as_str(), config.daemon.port))
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to bind TCP {}:{} — is another vitals-daemon running?",
+                    config.daemon.host, config.daemon.port
+                )
+            })?;
+
+    println!(
+        "Vitals daemon listening on http://{}:{}/health",
+        config.daemon.host, config.daemon.port
+    );
+
+    let tcp_app = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(tcp_listener, tcp_app).await {
+            eprintln!("TCP listener failed: {e}");
+        }
+    });
+
+    serve_unix_socket(unix_listener, app).await
 }
 
-/// Bind to a Unix domain socket (primary transport).
-async fn bind_unix_socket(app: &Router) -> Result<()> {
+/// Bind the Unix socket, removing any stale socket left by a previous run.
+fn unix_socket_listener() -> Result<tokio::net::UnixListener> {
     let socket_path = vitals_core::addr::daemon_socket_path();
 
     if let Some(parent) = socket_path.parent() {
@@ -443,42 +467,7 @@ async fn bind_unix_socket(app: &Router) -> Result<()> {
         socket_path.display()
     );
 
-    vitals_core::addr::write_addr_file(&vitals_core::addr::DaemonAddr::Unix { path: socket_path });
-
-    // Also try to serve on TCP for backward compatibility
-    let tcp_app = app.clone();
-    let tcp_config = tcp_app.clone();
-    tokio::spawn(async move {
-        if let Err(e) = try_bind_tcp_background(&tcp_config, 8080).await {
-            eprintln!("Optional TCP listener failed (non-fatal): {e}");
-        }
-    });
-
-    serve_unix_socket(listener, app.clone()).await
-}
-
-/// Try to bind TCP in the background (optional, backward compatibility).
-async fn try_bind_tcp_background(app: &Router, start_port: u16) -> Result<()> {
-    for port in start_port..=start_port + 10 {
-        let addr = format!("127.0.0.1:{port}");
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                println!("  Also listening on TCP: http://{addr}/health");
-                axum::serve(listener, app.clone())
-                    .await
-                    .context("TCP server failed")?;
-                return Ok(());
-            }
-            Err(_) if port < start_port + 10 => (),
-            Err(e) => {
-                anyhow::bail!(
-                    "Failed to bind TCP after trying ports {start_port}-{}: {e}",
-                    start_port + 10
-                );
-            }
-        }
-    }
-    Ok(())
+    Ok(listener)
 }
 
 /// Accept connections on a Unix socket and serve the axum app.
@@ -515,40 +504,6 @@ async fn serve_unix_socket(listener: tokio::net::UnixListener, app: Router) -> R
             }
         });
     }
-}
-
-/// Bind to TCP with port fallback (primary fallback transport).
-async fn bind_tcp_with_fallback(app: &Router, config: &Config) -> Result<()> {
-    let start_port = config.daemon.port;
-    for port in start_port..=start_port + 10 {
-        let addr = format!("{}:{}", config.daemon.host, port);
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                println!("Vitals daemon listening on {addr}");
-                println!("  Health endpoint: http://{addr}/health");
-                println!("  Metrics endpoint: http://{addr}/metrics");
-
-                vitals_core::addr::write_addr_file(&vitals_core::addr::DaemonAddr::Tcp {
-                    url: format!("http://{addr}"),
-                });
-
-                axum::serve(listener, app.clone())
-                    .await
-                    .context("HTTP server failed")?;
-                return Ok(());
-            }
-            Err(_) if port < start_port + 10 => {
-                eprintln!("Port {port} in use, trying {next}", next = port + 1);
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "Failed to bind TCP after trying ports {start_port}-{}: {e}",
-                    start_port + 10
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Create the HTTP application router

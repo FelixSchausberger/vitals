@@ -3,8 +3,6 @@
 //! This module defines the core traits and data structures for reading
 //! system information from various sources like systemd and journald.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -102,100 +100,6 @@ pub struct UnitMetrics {
     pub pids: Vec<u32>,
 }
 
-/// Time series data point for metrics storage.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MetricsDataPoint<T> {
-    /// Timestamp when the metrics were collected
-    #[serde(with = "time::serde::rfc3339")]
-    pub timestamp: OffsetDateTime,
-    /// The metrics data
-    pub data: T,
-}
-
-/// Ring buffer for storing time series metrics in memory.
-#[derive(Debug, Clone)]
-pub struct MetricsRingBuffer<T> {
-    /// Fixed-size buffer
-    data: Vec<MetricsDataPoint<T>>,
-    /// Current write position
-    position: usize,
-    /// Maximum number of samples to keep
-    capacity: usize,
-}
-
-impl<T> MetricsRingBuffer<T> {
-    /// Create a new ring buffer with the specified capacity.
-    #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-            position: 0,
-            capacity,
-        }
-    }
-
-    /// Add a new data point to the ring buffer.
-    pub fn push(&mut self, data_point: MetricsDataPoint<T>) {
-        if self.data.len() < self.capacity {
-            self.data.push(data_point);
-        } else {
-            self.data[self.position] = data_point;
-            self.position = (self.position + 1) % self.capacity;
-        }
-    }
-
-    /// Get all data points in chronological order.
-    #[must_use]
-    pub fn get_all(&self) -> Vec<&MetricsDataPoint<T>> {
-        if self.data.len() < self.capacity {
-            self.data.iter().collect()
-        } else {
-            let mut result = Vec::with_capacity(self.data.len());
-            for i in 0..self.data.len() {
-                let index = (self.position + i) % self.data.len();
-                result.push(&self.data[index]);
-            }
-            result
-        }
-    }
-
-    /// Get data points within a time range.
-    #[must_use]
-    pub fn get_range(
-        &self,
-        start: OffsetDateTime,
-        end: OffsetDateTime,
-    ) -> Vec<&MetricsDataPoint<T>> {
-        self.get_all()
-            .into_iter()
-            .filter(|point| point.timestamp >= start && point.timestamp <= end)
-            .collect()
-    }
-
-    /// Get the most recent N data points.
-    #[must_use]
-    pub fn get_recent(&self, count: usize) -> Vec<&MetricsDataPoint<T>> {
-        let all = self.get_all();
-        if count >= all.len() {
-            all
-        } else {
-            all[all.len() - count..].to_vec()
-        }
-    }
-
-    /// Check if the buffer is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Get the number of data points stored.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-}
-
 /// Async trait for reading journal entries.
 #[allow(async_fn_in_trait)]
 pub trait JournalReader {
@@ -273,28 +177,4 @@ pub trait UnitMetricsReader {
 
     /// Get metrics for a specific unit.
     async fn get_unit_metrics(&self, unit_name: &str) -> anyhow::Result<Option<UnitMetrics>>;
-}
-
-/// Configuration for metrics collection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricsConfig {
-    /// Sampling interval in seconds
-    pub sample_interval_secs: u64,
-    /// Number of samples to keep in memory (default: 300 for 5 minutes at 1s)
-    pub memory_buffer_size: usize,
-    /// Whether to enable persistent storage
-    pub enable_persistence: bool,
-    /// Path for persistent storage (optional)
-    pub persistence_path: Option<std::path::PathBuf>,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            sample_interval_secs: 1,
-            memory_buffer_size: 300,
-            enable_persistence: false,
-            persistence_path: None,
-        }
-    }
 }
