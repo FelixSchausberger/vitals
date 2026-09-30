@@ -268,3 +268,53 @@ build           # Nix build
 build:daemon    # Nix build daemon only
 build:tui       # Nix build TUI only
 ```
+
+## Roadmap
+
+### Integrate `systemd-report` (blocked: needs systemd ≥ 261)
+
+Background: [It Starts Upstream: systemd's New Report Subsystem](https://amutable.com/blog/it-starts-upstream-systemd-report).
+
+Vitals currently has no off-box reporting. `systemd-report` would provide it —
+compiled, time-stamped JSON, uploaded by a `.timer`, cryptographically signed
+(software / TPM2 / CoCo signers ship with systemd). Vitals would only need to
+expose its numbers as a metrics source; upload, signing and scheduling come
+free.
+
+**Do not start until both gates pass.**
+
+Gate 1 — nixpkgs ships systemd ≥ 261:
+
+- `systemd-report generate` (build the JSON report) and `upload` (`--url`,
+  `--key`, `--cert`, `--trust`) are both *added in version 261*. systemd 260
+  only offers `metrics`, `describe` and `list-sources`.
+- Verify with `systemd-report --help` (the binary lives in
+  `lib/systemd/systemd-report`, not on `PATH`).
+- The workspace pins nixpkgs to `nixos-26.05` (systemd 260.x) deliberately —
+  cargo-audit needs CVSS v4.0 parsing, and unstable dropped `x86_64-darwin`.
+  Bumping that pin is a separate decision, not part of this task.
+
+Gate 2 — report sources are actually installed:
+
+- On systemd 260 as packaged today, `systemd-report list-sources` returns only
+  `io.systemd.Manager` and `io.systemd.Network` (per-unit active timestamps and
+  link state). The useful families — per-cgroup CPU/memory/IO counters, PSI,
+  disk I/O, memory, swap, load — come from `systemd-report-basic.socket` and
+  `systemd-report-cgroup.socket`, which nixpkgs keeps under
+  `example/systemd/system/` and never installs.
+- Verify: `systemd-report list-sources` on the target system must show more
+  than the two built-in sources.
+
+Task once both gates pass:
+
+1. Bind an `AF_UNIX` socket under `/run/systemd/report/` implementing one
+   Varlink method that returns vitals' health score, issue counts and the TWHS
+   breakdown as a metric family.
+2. Enable a `systemd-report.timer` with `--url=<control plane>`; delete any
+   hand-rolled upload/auth code — systemd signs the report for us.
+3. Keep the Prometheus `/metrics` endpoint: upstream has explicitly *not*
+   built a Prometheus bridge, so it is not a replacement.
+
+Explicitly out of scope: replacing the journald or procfs readers.
+`systemd-report` exposes no journal content and, below 261, no resource
+metrics at all.
