@@ -122,6 +122,13 @@ jobs:
         run: |
           nix develop --command cargo nextest run --workspace
           echo "✅ All tests passed"
+      - name: Run daemon flake checks (namaka snapshots)
+        run: |
+          # daemon/flake.nix is a separate flake with its own checks; they are
+          # not reachable from `nix flake check` at the workspace root.
+          # --no-build: the snapshots are evaluation-time assertions.
+          cd daemon && nix flake check --no-build
+          echo "✅ Daemon flake checks passed"
   build:
     name: Build Packages
     runs-on: ubuntu-latest
