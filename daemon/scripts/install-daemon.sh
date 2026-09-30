@@ -8,9 +8,10 @@ set -e
 DAEMON_NAME="vitals-daemon"
 DAEMON_USER="vitals"
 DAEMON_GROUP="vitals"
-CONFIG_DIR="/etc/vitals"
-LOG_DIR="/var/log/vitals"
 DATA_DIR="/var/lib/vitals"
+# Config::default_path() resolves $XDG_CONFIG_HOME|$HOME/.config/vitals/config.toml
+# and HOME is /var/lib/vitals for the system service user.
+CONFIG_DIR="$DATA_DIR/.config/vitals"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Colors for output
@@ -65,7 +66,7 @@ create_user() {
 create_directories() {
 	log_info "Creating required directories"
 
-	for dir in "$CONFIG_DIR" "$LOG_DIR" "$DATA_DIR"; do
+	for dir in "$DATA_DIR" "$CONFIG_DIR"; do
 		if [[ ! -d "$dir" ]]; then
 			mkdir -p "$dir"
 			log_info "Created directory: $dir"
@@ -75,10 +76,10 @@ create_directories() {
 	done
 
 	# Set ownership
-	chown -R "$DAEMON_USER:$DAEMON_GROUP" "$CONFIG_DIR" "$LOG_DIR" "$DATA_DIR"
+	chown -R "$DAEMON_USER:$DAEMON_GROUP" "$DATA_DIR"
 
 	# Set permissions
-	chmod 755 "$CONFIG_DIR" "$LOG_DIR" "$DATA_DIR"
+	chmod 755 "$DATA_DIR"
 
 	log_info "Set ownership and permissions for daemon directories"
 }
@@ -125,7 +126,7 @@ install_service() {
 
 # Create default configuration
 create_default_config() {
-	local config_file="$CONFIG_DIR/daemon.toml"
+	local config_file="$CONFIG_DIR/config.toml"
 
 	if [[ -f "$config_file" ]]; then
 		log_warn "Configuration file already exists at $config_file"

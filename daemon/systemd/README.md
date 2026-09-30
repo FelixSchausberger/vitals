@@ -21,7 +21,7 @@ sudo ./daemon/scripts/install-daemon.sh
 
 The installation script will automatically:
 - Create the `vitals` system user and group
-- Create required directories (`/etc/vitals`, `/var/log/vitals`, `/var/lib/vitals`)
+- Create required directories (`/var/lib/vitals`)
 - Install the daemon binary to `/usr/local/bin/vitals-daemon`
 - Install and enable the systemd service
 - Create a default configuration file
@@ -43,10 +43,10 @@ sudo useradd --system --gid vitals --shell /bin/false \
              --comment "Vitals monitoring daemon" vitals
 sudo groupadd --system vitals
 
-# Create directories
-sudo mkdir -p /etc/vitals /var/log/vitals /var/lib/vitals
-sudo chown -R vitals:vitals /etc/vitals /var/log/vitals /var/lib/vitals
-sudo chmod 755 /etc/vitals /var/log/vitals /var/lib/vitals
+# Create the service home (config and score history live underneath it)
+sudo mkdir -p /var/lib/vitals
+sudo chown -R vitals:vitals /var/lib/vitals
+sudo chmod 755 /var/lib/vitals
 
 # Install binary
 sudo cp target/release/vitals-daemon /usr/local/bin/vitals-daemon
@@ -120,9 +120,11 @@ systemctl --user disable vitals-daemon
 
 ## Configuration
 
-Default configuration locations:
-- System: `/etc/vitals/daemon.toml`
-- User: `~/.config/vitals/daemon.toml`
+Default configuration location is `$XDG_CONFIG_HOME|$HOME/.config/vitals/config.toml`
+(`Config::default_path()`). Missing file means built-in defaults.
+
+- System service: `/var/lib/vitals/.config/vitals/config.toml`
+- User service / manual run: `~/.config/vitals/config.toml`
 
 Example configuration:
 
@@ -189,8 +191,8 @@ curl http://127.0.0.1:8080/metrics
 
 4. **Permission issues**:
    ```bash
-   sudo chown -R vitals:vitals /etc/vitals /var/log/vitals /var/lib/vitals
-   sudo chmod 755 /etc/vitals /var/log/vitals /var/lib/vitals
+   sudo chown -R vitals:vitals /var/lib/vitals
+   sudo chmod 755 /var/lib/vitals
    ```
 
 5. **API not responding**:
