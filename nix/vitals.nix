@@ -40,12 +40,12 @@ in
       wantedBy = [ "multi-user.target" ];
 
       environment = {
-        # Unix socket lives at $XDG_RUNTIME_DIR/vitals/daemon.sock
-        XDG_RUNTIME_DIR = "/run/vitals";
-        # Daemon address discovery file
-        XDG_STATE_HOME = "/var/lib/vitals";
-        # Score history persistence
-        XDG_DATA_HOME = "/var/lib/vitals";
+        # The daemon joins "$XDG_RUNTIME_DIR/vitals/daemon.sock", so this puts
+        # the socket at /run/vitals/daemon.sock — inside RuntimeDirectory below
+        # and reachable by clients through the documented system path.
+        XDG_RUNTIME_DIR = "/run";
+        # Score history persistence ($XDG_DATA_HOME/vitals/history.json)
+        XDG_DATA_HOME = "/var/lib";
       };
 
       serviceConfig = {
@@ -55,9 +55,9 @@ in
         DynamicUser = true;
         RuntimeDirectory = "vitals";
         StateDirectory = "vitals";
-        # ProtectSystem=strict mounts /run read-only; allow socket binding
-        ReadWritePaths = [ "/run/vitals" ];
         NoNewPrivileges = true;
+        # RuntimeDirectory=/StateDirectory= are exempt from ProtectSystem=strict,
+        # so no ReadWritePaths= is needed for the socket or state.
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
