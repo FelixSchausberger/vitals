@@ -355,7 +355,7 @@ vitals_health_score{{type="raw"}} {raw_score} {timestamp}
 vitals_health_score{{type="smoothed"}} {smoothed_score} {timestamp}
 
 # HELP vitals_issues_total Total number of issues by severity
-# TYPE vitals_issues_total counter
+# TYPE vitals_issues_total gauge
 vitals_issues_total{{severity="error"}} {error_count} {timestamp}
 vitals_issues_total{{severity="warning"}} {warning_count} {timestamp}
 vitals_issues_total{{severity="info"}} {info_count} {timestamp}
@@ -729,7 +729,7 @@ vitals_health_score{{type="raw"}} {raw_score} {timestamp}
 vitals_health_score{{type="smoothed"}} {smoothed_score} {timestamp}
 
 # HELP vitals_issues_total Total number of issues by severity
-# TYPE vitals_issues_total counter
+# TYPE vitals_issues_total gauge
 vitals_issues_total{{severity="error"}} {error_count} {timestamp}
 vitals_issues_total{{severity="warning"}} {warning_count} {timestamp}
 vitals_issues_total{{severity="info"}} {info_count} {timestamp}
