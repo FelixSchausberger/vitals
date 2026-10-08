@@ -354,11 +354,11 @@ fn output_prometheus(breakdown: &HealthBreakdown) {
 vitals_health_score{{type="raw"}} {raw_score} {timestamp}
 vitals_health_score{{type="smoothed"}} {smoothed_score} {timestamp}
 
-# HELP vitals_issues_total Total number of issues by severity
-# TYPE vitals_issues_total gauge
-vitals_issues_total{{severity="error"}} {error_count} {timestamp}
-vitals_issues_total{{severity="warning"}} {warning_count} {timestamp}
-vitals_issues_total{{severity="info"}} {info_count} {timestamp}
+# HELP vitals_issues Total number of issues by severity
+# TYPE vitals_issues gauge
+vitals_issues{{severity="error"}} {error_count} {timestamp}
+vitals_issues{{severity="warning"}} {warning_count} {timestamp}
+vitals_issues{{severity="info"}} {info_count} {timestamp}
 
 # HELP vitals_health_status Current health status (0=critical, 1=poor, 2=fair, 3=good, 4=excellent)
 # TYPE vitals_health_status gauge
@@ -728,11 +728,11 @@ vitals_health_status -1 {timestamp_ms}
 vitals_health_score{{type="raw"}} {raw_score} {timestamp}
 vitals_health_score{{type="smoothed"}} {smoothed_score} {timestamp}
 
-# HELP vitals_issues_total Total number of issues by severity
-# TYPE vitals_issues_total gauge
-vitals_issues_total{{severity="error"}} {error_count} {timestamp}
-vitals_issues_total{{severity="warning"}} {warning_count} {timestamp}
-vitals_issues_total{{severity="info"}} {info_count} {timestamp}
+# HELP vitals_issues Total number of issues by severity
+# TYPE vitals_issues gauge
+vitals_issues{{severity="error"}} {error_count} {timestamp}
+vitals_issues{{severity="warning"}} {warning_count} {timestamp}
+vitals_issues{{severity="info"}} {info_count} {timestamp}
 
 # HELP vitals_health_status Current health status (0=critical, 1=poor, 2=fair, 3=good, 4=excellent)
 # TYPE vitals_health_status gauge
