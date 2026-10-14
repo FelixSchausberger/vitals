@@ -27,6 +27,11 @@
 use crate::{baseline::ResourceBaseline, config::ResourceConfig, types::ResourceSnapshot};
 
 /// Computed resource penalties for each dimension.
+///
+/// Each dimension carries two values: the raw penalty `R_j`, a normalized
+/// 0..=`r_max` gauge used to label the dimension (the `*_status` fields), and
+/// the weighted burden `alpha_j` × `R_j`, which is the quantity that shares
+/// units with issue penalties. Only the weighted burdens sum to [`Self::total`].
 #[derive(Debug, Clone)]
 pub struct ResourcePenalties {
     /// CPU penalty before alpha weighting.
@@ -37,6 +42,14 @@ pub struct ResourcePenalties {
     pub disk: f64,
     /// Load average penalty before alpha weighting.
     pub load: f64,
+    /// CPU burden: `alpha_cpu` × [`Self::cpu`].
+    pub cpu_burden: f64,
+    /// Memory burden: `alpha_memory` × [`Self::memory`].
+    pub memory_burden: f64,
+    /// Disk burden: `alpha_disk` × [`Self::disk`].
+    pub disk_burden: f64,
+    /// Load burden: `alpha_load` × [`Self::load`].
+    pub load_burden: f64,
     /// Total weighted penalty: Σ `alpha_j` × `R_j`.
     pub total: f64,
     /// True if static thresholds are in use (baseline not yet learned).
@@ -51,6 +64,15 @@ pub fn compute_resource_penalties(
     config: &ResourceConfig,
 ) -> ResourcePenalties {
     let has_baseline = baseline.sample_count >= config.min_samples_for_baseline;
+
+    // The bootstrap thresholds are per-core constants, so raw load is divided
+    // by the core count before comparison: on a many-core machine raw load
+    // alone would cross them while every core sits idle. The baseline branch
+    // stays on raw load, because the sigmoid divides usage, mean and std by the
+    // same scale and is therefore invariant to this normalization, and because
+    // the baseline learns this machine's own load as reported.
+    #[allow(clippy::cast_precision_loss)]
+    let load_per_core = snapshot.load_average / snapshot.cpu_count.max(1) as f64;
 
     let (cpu, memory, disk, load) = if has_baseline {
         (
@@ -95,25 +117,25 @@ pub fn compute_resource_penalties(
                 t.disk_error,
                 config.r_max,
             ),
-            bootstrap_penalty(
-                snapshot.load_average,
-                t.load_warning,
-                t.load_error,
-                config.r_max,
-            ),
+            bootstrap_penalty(load_per_core, t.load_warning, t.load_error, config.r_max),
         )
     };
 
-    let total = config.alpha_cpu * cpu
-        + config.alpha_memory * memory
-        + config.alpha_disk * disk
-        + config.alpha_load * load;
+    let cpu_burden = config.alpha_cpu * cpu;
+    let memory_burden = config.alpha_memory * memory;
+    let disk_burden = config.alpha_disk * disk;
+    let load_burden = config.alpha_load * load;
+    let total = cpu_burden + memory_burden + disk_burden + load_burden;
 
     ResourcePenalties {
         cpu,
         memory,
         disk,
         load,
+        cpu_burden,
+        memory_burden,
+        disk_burden,
+        load_burden,
         total,
         learning_mode: !has_baseline,
     }
@@ -185,6 +207,7 @@ mod tests {
             memory_usage: 50.0,
             disk_usage: 40.0,
             load_average: 1.0,
+            cpu_count: 1,
         };
 
         let p = compute_resource_penalties(&snap, &baseline, &config);
@@ -207,6 +230,7 @@ mod tests {
             memory_usage: 50.0,
             disk_usage: 40.0,
             load_average: 1.0,
+            cpu_count: 1,
         };
 
         let p = compute_resource_penalties(&snap, &baseline, &config);
@@ -229,6 +253,7 @@ mod tests {
             memory_usage: 50.0,
             disk_usage: 40.0,
             load_average: 1.0,
+            cpu_count: 1,
         };
 
         let p = compute_resource_penalties(&snap, &baseline, &config);
@@ -248,9 +273,64 @@ mod tests {
             memory_usage: 50.0,
             disk_usage: 40.0,
             load_average: 1.0,
+            cpu_count: 1,
         };
 
         let p = compute_resource_penalties(&snap, &baseline, &config);
         assert_eq!(p.cpu, config.r_max * 0.9); // error tier
+    }
+
+    #[test]
+    fn bootstrap_load_threshold_is_per_core() {
+        let config = ResourceConfig::default();
+        let baseline = ResourceBaseline::new(); // bootstrap: static thresholds
+
+        // Load 8.0 on 8 cores is 1.0 per core, below the 2.0 warning threshold.
+        let many_cores = ResourceSnapshot {
+            cpu_usage: 10.0,
+            memory_usage: 50.0,
+            disk_usage: 40.0,
+            load_average: 8.0,
+            cpu_count: 8,
+        };
+        assert_eq!(
+            compute_resource_penalties(&many_cores, &baseline, &config).load,
+            0.0
+        );
+
+        // The same raw load on a single core is above the 5.0 error threshold.
+        let one_core = ResourceSnapshot {
+            cpu_count: 1,
+            ..many_cores
+        };
+        assert_eq!(
+            compute_resource_penalties(&one_core, &baseline, &config).load,
+            config.r_max * 0.9
+        );
+    }
+
+    #[test]
+    fn burden_fields_are_weighted_and_sum_to_total() {
+        let config = ResourceConfig::default();
+        // Baseline far below the snapshot so every dimension scores non-zero.
+        let baseline = baseline_with_cpu(10.0, 2.0, config.min_samples_for_baseline);
+        let snap = ResourceSnapshot {
+            cpu_usage: 90.0,
+            memory_usage: 90.0,
+            disk_usage: 90.0,
+            load_average: 90.0,
+            cpu_count: 1,
+        };
+
+        let p = compute_resource_penalties(&snap, &baseline, &config);
+        // Each burden is its gauge scaled by the matching alpha weight.
+        assert_eq!(p.cpu_burden, config.alpha_cpu * p.cpu);
+        assert_eq!(p.memory_burden, config.alpha_memory * p.memory);
+        assert_eq!(p.disk_burden, config.alpha_disk * p.disk);
+        assert_eq!(p.load_burden, config.alpha_load * p.load);
+        // And they are the only terms in the total, which is not the sum of the
+        // unweighted gauges.
+        let sum = p.cpu_burden + p.memory_burden + p.disk_burden + p.load_burden;
+        assert!((sum - p.total).abs() < 1e-9, "burdens must sum to total");
     }
 }

@@ -91,6 +91,16 @@ pub struct ResourceSnapshot {
     pub disk_usage: f64,
     /// System load average (1-minute, raw — not normalized by CPU count).
     pub load_average: f64,
+    /// Logical CPU count, used to compare [`Self::load_average`] against the
+    /// per-core bootstrap thresholds. Defaults to 1 (no normalization) so a
+    /// snapshot serialized without it keeps raw semantics.
+    #[serde(default = "one_cpu")]
+    pub cpu_count: usize,
+}
+
+/// Serde default for [`ResourceSnapshot::cpu_count`].
+fn one_cpu() -> usize {
+    1
 }
 
 /// The full input payload for a single scoring invocation.
@@ -189,16 +199,30 @@ pub struct EventContribution {
 }
 
 /// How resource utilization contributes to the health burden.
+///
+/// Two scales appear here. The `*_penalty` fields are normalized gauges in
+/// 0..=`r_max`, used to label a dimension (healthy / warning / critical). The
+/// `*_burden` fields are those gauges weighted by `alpha_j`; they are the
+/// dimension's actual contribution to the burden, so they sum to [`Self::total`]
+/// and are comparable with issue penalties.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceContribution {
-    /// CPU penalty (before weighting by `alpha_cpu`).
+    /// CPU penalty (normalized gauge, before weighting by `alpha_cpu`).
     pub cpu_penalty: f64,
-    /// Memory penalty (before weighting by `alpha_memory`).
+    /// Memory penalty (normalized gauge, before weighting by `alpha_memory`).
     pub memory_penalty: f64,
-    /// Disk penalty (before weighting by `alpha_disk`).
+    /// Disk penalty (normalized gauge, before weighting by `alpha_disk`).
     pub disk_penalty: f64,
-    /// Load average penalty (before weighting by `alpha_load`).
+    /// Load average penalty (normalized gauge, before weighting by `alpha_load`).
     pub load_penalty: f64,
+    /// CPU burden: `alpha_cpu` × `cpu_penalty`.
+    pub cpu_burden: f64,
+    /// Memory burden: `alpha_memory` × `memory_penalty`.
+    pub memory_burden: f64,
+    /// Disk burden: `alpha_disk` × `disk_penalty`.
+    pub disk_burden: f64,
+    /// Load burden: `alpha_load` × `load_penalty`.
+    pub load_burden: f64,
     /// Total weighted resource burden: Σ `alpha_j` × `R_j`.
     pub total: f64,
     /// Share of total burden as a percentage.

@@ -152,6 +152,10 @@ pub fn compute(
         memory_penalty: r.memory,
         disk_penalty: r.disk,
         load_penalty: r.load,
+        cpu_burden: r.cpu_burden,
+        memory_burden: r.memory_burden,
+        disk_burden: r.disk_burden,
+        load_burden: r.load_burden,
         total: r.total,
         burden_share_pct: if total_burden > 1e-9 {
             (r.total / total_burden) * 100.0

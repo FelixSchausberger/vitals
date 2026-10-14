@@ -40,26 +40,34 @@ pub struct HealthBreakdown {
 pub struct ResourceHealthMetrics {
     /// Current CPU usage percentage
     pub cpu_usage: f64,
-    /// CPU contribution to resource burden (positive value)
+    /// CPU penalty gauge in 0..=`r_max`, drives `cpu_status`
     pub cpu_penalty: f64,
+    /// CPU share of the weighted resource burden (`alpha_cpu` × `cpu_penalty`)
+    pub cpu_burden: f64,
     /// CPU usage health status
     pub cpu_status: ResourceStatus,
     /// Current memory usage percentage
     pub memory_usage: f64,
-    /// Memory contribution to resource burden (positive value)
+    /// Memory penalty gauge in 0..=`r_max`, drives `memory_status`
     pub memory_penalty: f64,
+    /// Memory share of the weighted resource burden
+    pub memory_burden: f64,
     /// Memory usage health status
     pub memory_status: ResourceStatus,
     /// Current disk usage percentage
     pub disk_usage: f64,
-    /// Disk contribution to resource burden (positive value)
+    /// Disk penalty gauge in 0..=`r_max`, drives `disk_status`
     pub disk_penalty: f64,
+    /// Disk share of the weighted resource burden
+    pub disk_burden: f64,
     /// Disk usage health status
     pub disk_status: ResourceStatus,
     /// Current load average
     pub load_average: f64,
-    /// Load contribution to resource burden (positive value)
+    /// Load penalty gauge in 0..=`r_max`, drives `load_status`
     pub load_penalty: f64,
+    /// Load share of the weighted resource burden
+    pub load_burden: f64,
     /// Load average health status
     pub load_status: ResourceStatus,
     /// Total resource impact on health score (negative value)
