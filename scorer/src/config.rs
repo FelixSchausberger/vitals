@@ -178,8 +178,11 @@ impl Default for BootstrapThresholds {
             memory_error: 95.0,
             disk_warning: 85.0,
             disk_error: 95.0,
-            load_warning: 2.0, // per core
-            load_error: 5.0,   // per core
+            // Load is compared per logical core: compute_resource_penalties
+            // divides the raw load average by the CPU count before checking
+            // these thresholds, so they hold regardless of core count.
+            load_warning: 2.0,
+            load_error: 5.0,
         }
     }
 }

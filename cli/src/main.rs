@@ -97,6 +97,17 @@ struct Resources {
     disk_penalty: f64,
     load_average: f64,
     load_penalty: f64,
+    /// Weighted per-dimension burden (`alpha_j` × penalty). These sum to
+    /// `resource_impact` and are the only resource figures comparable with
+    /// issue impacts; `*_penalty` is a 0..20 gauge behind the status glyph.
+    #[serde(default)]
+    cpu_burden: f64,
+    #[serde(default)]
+    memory_burden: f64,
+    #[serde(default)]
+    disk_burden: f64,
+    #[serde(default)]
+    load_burden: f64,
     #[serde(default)]
     resource_impact: f64,
     #[serde(default)]
@@ -314,19 +325,21 @@ fn build_bar(value: f64, max: f64, width: usize) -> String {
 fn collect_burden_sources(h: &HealthResponse, max_items: usize) -> Vec<(String, f64)> {
     let mut sources: Vec<(String, f64)> = Vec::new();
 
-    // Resource penalties (each dimension as a separate source)
+    // Resource burden, per dimension. The weighted `*_burden` fields are used
+    // rather than the `*_penalty` gauges: the gauges are normalized to 0..20 for
+    // the status glyph, so summing them against issue impacts overstated
+    // resources roughly fourfold (load alone read as burden 19.3 when its share
+    // of the score was 2.9).
     if let Some(ref res) = h.resources {
-        if res.cpu_penalty > 0.05 {
-            sources.push(("CPU".into(), res.cpu_penalty));
-        }
-        if res.memory_penalty > 0.05 {
-            sources.push(("Memory".into(), res.memory_penalty));
-        }
-        if res.disk_penalty > 0.05 {
-            sources.push(("Disk".into(), res.disk_penalty));
-        }
-        if res.load_penalty > 0.05 {
-            sources.push(("Load".into(), res.load_penalty));
+        for (label, burden) in [
+            ("CPU", res.cpu_burden),
+            ("Memory", res.memory_burden),
+            ("Disk", res.disk_burden),
+            ("Load", res.load_burden),
+        ] {
+            if burden > 0.05 {
+                sources.push((label.into(), burden));
+            }
         }
     }
 
@@ -724,5 +737,65 @@ fn status_icon(score: f64) -> &'static str {
         50..=74 => "\u{25d5}",
         25..=49 => "\u{25d1}",
         _ => "\u{25cb}",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::float_cmp)]
+    use super::*;
+
+    /// Trimmed daemon `/health` payload: one issue plus resource metrics whose
+    /// unweighted gauges sum to ~47 while the weighted burdens sum to ~10.8.
+    const HEALTH_JSON: &str = r#"{
+      "score": 52.3,
+      "status": "fair",
+      "issues": [
+        {"id": "a", "title": "Failed Unit: x", "severity": "Error", "count": 1, "impact": -10.0}
+      ],
+      "resources": {
+        "cpu_usage": 12.5, "cpu_penalty": 8.4, "cpu_burden": 2.94,
+        "memory_usage": 52.4, "memory_penalty": 11.3, "memory_burden": 3.39,
+        "disk_usage": 36.6, "disk_penalty": 7.8, "disk_burden": 1.56,
+        "load_average": 2.27, "load_penalty": 19.3, "load_burden": 2.895,
+        "resource_impact": -10.785
+      }
+    }"#;
+
+    #[test]
+    fn burden_sources_report_weighted_resource_burden() {
+        let h: HealthResponse = serde_json::from_str(HEALTH_JSON).expect("parse fixture");
+        let sources = collect_burden_sources(&h, 5);
+        let burden_of = |name: &str| {
+            sources
+                .iter()
+                .find(|(label, _)| label == name)
+                .map(|(_, burden)| *burden)
+        };
+
+        // Weighted burdens, not the 0..20 penalty gauges.
+        assert_eq!(burden_of("Load"), Some(2.895));
+        assert_eq!(burden_of("CPU"), Some(2.94));
+        assert_eq!(burden_of("Issues"), Some(10.0));
+
+        // The resource entries account for exactly the resource impact; before
+        // the fix they summed to the gauges (46.8) instead.
+        let resource_sum: f64 = ["CPU", "Memory", "Disk", "Load"]
+            .iter()
+            .filter_map(|name| burden_of(name))
+            .sum();
+        assert!(
+            (resource_sum - 10.785).abs() < 1e-9,
+            "resource burdens must sum to |resource_impact|, got {resource_sum}"
+        );
+    }
+
+    #[test]
+    fn penalty_gauges_remain_available_for_display() {
+        let h: HealthResponse = serde_json::from_str(HEALTH_JSON).expect("parse fixture");
+        let res = h.resources.as_ref().expect("resources present");
+        // The gauge stays available for display even though burden is weighted.
+        assert_eq!(res.cpu_penalty, 8.4);
+        assert_eq!(res.load_penalty, 19.3);
     }
 }

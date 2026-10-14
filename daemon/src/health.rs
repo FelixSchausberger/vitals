@@ -118,18 +118,22 @@ impl TwhsCalculator {
                 .map(|rc| ResourceHealthMetrics {
                     cpu_usage: snap.cpu_usage,
                     cpu_penalty: rc.cpu_penalty,
+                    cpu_burden: rc.cpu_burden,
                     cpu_status: penalty_to_status(rc.cpu_penalty, self.config.resources.r_max),
                     memory_usage: snap.memory_usage,
                     memory_penalty: rc.memory_penalty,
+                    memory_burden: rc.memory_burden,
                     memory_status: penalty_to_status(
                         rc.memory_penalty,
                         self.config.resources.r_max,
                     ),
                     disk_usage: snap.disk_usage,
                     disk_penalty: rc.disk_penalty,
+                    disk_burden: rc.disk_burden,
                     disk_status: penalty_to_status(rc.disk_penalty, self.config.resources.r_max),
                     load_average: snap.load_average,
                     load_penalty: rc.load_penalty,
+                    load_burden: rc.load_burden,
                     load_status: penalty_to_status(rc.load_penalty, self.config.resources.r_max),
                     resource_impact: -rc.total,
                     resource_hog_count: 0,
@@ -186,6 +190,9 @@ fn metrics_to_snapshot(metrics: &Metrics) -> ResourceSnapshot {
         memory_usage: metrics.memory_usage,
         disk_usage: metrics.disk_usage,
         load_average: metrics.load_average,
+        // The scorer compares load per core against its per-core bootstrap
+        // thresholds, so the snapshot must carry the core count.
+        cpu_count: num_cpus::get(),
     }
 }
 
