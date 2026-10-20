@@ -39,7 +39,6 @@ use vitals_daemon::{
     },
     health::{score_to_heartbeat_color, score_to_status, HealthBreakdown, TwhsCalculator},
     history::ScoreHistory,
-    notifier::Notifier,
     probes::ProbeState,
 };
 
@@ -49,7 +48,6 @@ struct AppState {
     health_data: Arc<RwLock<Option<HealthBreakdown>>>,
     history: Arc<RwLock<ScoreHistory>>,
     config: Arc<Config>,
-    notifier: Arc<RwLock<Notifier>>,
     journal_entries: Arc<RwLock<Vec<JournalEntry>>>,
 }
 
@@ -401,7 +399,6 @@ async fn run_daemon(config: Config, args: Args) -> Result<()> {
         health_data: Arc::new(RwLock::new(None)),
         history: Arc::new(RwLock::new(ScoreHistory::load_or_new())),
         config: Arc::new(config.clone()),
-        notifier: Arc::new(RwLock::new(Notifier::new(config.notifier.clone()))),
         journal_entries: Arc::new(RwLock::new(Vec::new())),
     };
 
@@ -923,17 +920,6 @@ async fn run_health_calculator(state: AppState, mode: String, debug: bool) -> Re
 
                 if let Ok(mut history) = state.history.write() {
                     history.push(score, OffsetDateTime::now_utc());
-                }
-
-                let now_ts = OffsetDateTime::now_utc().unix_timestamp();
-                let delta_1h = state
-                    .history
-                    .read()
-                    .ok()
-                    .and_then(|h| h.change_over_period(3600, score, now_ts));
-
-                if let Ok(mut notifier) = state.notifier.write() {
-                    notifier.notify(score, delta_1h, &breakdown);
                 }
             }
             Err(e) => {

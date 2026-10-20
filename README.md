@@ -236,10 +236,6 @@ sensitivity = 100.0
 [twhs.resources]
 r_max = 20.0
 steepness = 0.5
-
-[notifier]
-alert_below = 75.0
-cooldown_secs = 1800
 ```
 
 TUI options:

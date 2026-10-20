@@ -19,5 +19,4 @@ pub mod history;
 pub mod logs;
 /// Legacy model module for compatibility
 pub mod model;
-pub mod notifier;
 pub mod probes;
