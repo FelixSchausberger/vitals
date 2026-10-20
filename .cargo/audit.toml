@@ -1,0 +1,11 @@
+# cargo audit runs with --deny warnings in CI, so "unmaintained" advisories
+# fail the build like vulnerabilities do.
+#
+# RUSTSEC-2026-0370/0371/0372 cover zvariant, zvariant_derive and zbus_names:
+# they are no longer maintained as standalone crates and were merged into
+# zbus 6.0.0 as its wire module. No patched release exists in the zbus 5.x
+# line, which is the current stable line. The daemon only reads systemd state
+# over the local bus, so the unmaintained status carries no vulnerability.
+# Remove these ignores together with the zbus 6 migration.
+[advisories]
+ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
