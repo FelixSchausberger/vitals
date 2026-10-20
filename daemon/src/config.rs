@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use scorer::TwhsConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::{agg::AggregationConfig, notifier::NotifierConfig};
+use crate::agg::AggregationConfig;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,9 +28,6 @@ pub struct Config {
     /// Issue aggregation configuration
     #[serde(default)]
     pub aggregation: AggregationConfig,
-    /// Notifier configuration
-    #[serde(default)]
-    pub notifier: NotifierConfig,
 }
 
 /// Daemon-specific configuration
@@ -181,14 +178,6 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     if config.twhs.decay_half_life_hours <= 0.0 {
         anyhow::bail!("TWHS decay_half_life_hours must be positive");
-    }
-
-    if config.notifier.alert_below < 0.0 || config.notifier.alert_below > 100.0 {
-        anyhow::bail!("Notifier alert_below threshold must be between 0 and 100");
-    }
-
-    if config.notifier.cooldown_secs == 0 {
-        anyhow::bail!("Notifier cooldown_secs must be non-zero");
     }
 
     Ok(())
