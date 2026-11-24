@@ -291,6 +291,16 @@ fn group_journal_entries_enhanced<'a>(
 
 /// Return true if this entry is a non-actionable one-time boot noise message.
 fn is_boot_noise(entry: &JournalEntry) -> bool {
+    // systemd-logind re-validates every bootloader entry whenever something
+    // enumerates them, so this warning repeats long after boot and says
+    // nothing about the health of the running system.
+    if entry
+        .message
+        .contains("is not a valid version, accepting anyway")
+    {
+        return true;
+    }
+
     if entry.unit.is_some() {
         return false;
     }
@@ -1167,6 +1177,13 @@ mod tests {
                 priority: 4,
                 message: "zfs: module license 'CDDL' taints kernel.".to_string(),
                 unit: None,
+                pid: None,
+            },
+            JournalEntry {
+                timestamp: datetime!(2024-09-15 10:01:30 UTC),
+                priority: 4,
+                message: "/boot/loader/entries/nixos-x+3.conf:2: Version string 'Generation 1 NixOS' is not a valid version, accepting anyway.".to_string(),
+                unit: Some("systemd-logind.service".to_string()),
                 pid: None,
             },
             JournalEntry {
