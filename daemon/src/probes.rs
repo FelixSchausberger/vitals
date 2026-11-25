@@ -5,14 +5,15 @@
 //! | Probe           | Detection method                                             |
 //! |-----------------|--------------------------------------------------------------|
 //! | OOM kill        | Scan journal entries for kernel OOM kill messages            |
-//! | Restart storm   | Scan journal entries for systemd start-limit-hit entries     |
+//! | Restart loop    | Count scheduled restarts per unit across ticks; a         |
+//! |                 | start-limit-hit escalates the issue to Error                  |
 //! | Boot anomaly    | Run `systemd-analyze blame` once at startup; flag slow units |
 //! | RAM trend       | Track per-unit RSS over time; flag monotonic growth          |
 //!
 //! Each probe returns `Vec<Issue>` that is merged with the aggregated issue list
 //! before being fed to the TWHS calculator.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use time::OffsetDateTime;
 
@@ -32,12 +33,20 @@ const RAM_TREND_MIN_SAMPLES: usize = 5;
 /// Number of per-unit RSS samples to keep in the rolling buffer.
 const RAM_TREND_BUFFER_SIZE: usize = 20;
 
+/// Restart messages within this window make a unit a restart loop.
+const RESTART_LOOP_WINDOW_SECS: i64 = 600;
+
+/// Number of restart messages in the window required to flag a loop.
+const RESTART_LOOP_THRESHOLD: usize = 5;
+
 // ── ProbeState ────────────────────────────────────────────────────────────────
 
 /// Mutable state held by the probe collector across polling ticks.
 pub struct ProbeState {
     /// Per-unit RSS history (bytes).
     rss_history: HashMap<String, VecDeque<u64>>,
+    /// Per-unit restart history for loop detection.
+    restart_loops: RestartLoopDetector,
     /// Boot anomaly issues — computed once at startup, re-emitted every tick
     /// (with original `first_seen` so temporal decay handles them correctly).
     boot_issues: Vec<Issue>,
@@ -51,6 +60,7 @@ impl ProbeState {
         let boot_issues = detect_boot_anomalies();
         Self {
             rss_history: HashMap::new(),
+            restart_loops: RestartLoopDetector::default(),
             boot_issues,
         }
     }
@@ -66,7 +76,7 @@ impl ProbeState {
     ) -> Vec<Issue> {
         let mut issues = self.boot_issues.clone();
         issues.extend(scan_oom_kills(journal_entries, now));
-        issues.extend(detect_restart_storms(journal_entries, now));
+        issues.extend(self.restart_loops.collect(journal_entries, now));
         if let Some(metrics) = unit_metrics {
             issues.extend(self.detect_ram_trends(metrics, now));
         }
@@ -201,83 +211,146 @@ fn extract_oom_comm(message: &str) -> Option<String> {
         .map(|s| s.trim_start_matches("comm=").to_string())
 }
 
-// ── Restart storm ─────────────────────────────────────────────────────────────
+// ── Restart loop ──────────────────────────────────────────────────────────────
 
-/// Detect services that hit systemd's start limit.
+/// Tracks restart messages across ticks and flags units that keep restarting.
 ///
-/// Looks for systemd messages of the form:
-/// - `<unit>: Start request repeated too quickly`
-/// - `<unit>: Failed with result 'start-limit-hit'`
-fn detect_restart_storms(entries: &[JournalEntry], _now: OffsetDateTime) -> Vec<Issue> {
-    let mut storms: HashMap<String, (usize, OffsetDateTime, OffsetDateTime)> = HashMap::new();
+/// systemd only logs `start-limit-hit` when a unit exceeds its start rate
+/// limit (default: 5 starts in 10 s). A unit whose `RestartSec` spaces attempts
+/// outside that window never produces the marker — the media kiosk browser
+/// reached 2 700 starts that way — so the scheduled-restart messages are
+/// counted instead. A start-limit-hit escalates the finding from a Warning to
+/// an Error.
+#[derive(Default)]
+struct RestartLoopDetector {
+    /// Timestamps of restart messages, oldest first, per unit.
+    restarts: HashMap<String, VecDeque<OffsetDateTime>>,
+}
 
-    for entry in entries {
-        let msg = &entry.message;
-        if !msg.contains("start request repeated too quickly")
-            && !msg.contains("start-limit-hit")
-            && !msg.contains("Start request repeated")
-        {
-            continue;
+impl RestartLoopDetector {
+    /// Record this tick's restart messages and emit the current loops.
+    fn collect(&mut self, entries: &[JournalEntry], now: OffsetDateTime) -> Vec<Issue> {
+        let mut hit_limit: HashSet<String> = HashSet::new();
+
+        for entry in entries {
+            let Some(unit) = restart_unit(entry) else {
+                continue;
+            };
+            if is_start_limit_message(&entry.message) {
+                hit_limit.insert(unit.clone());
+            }
+            self.restarts
+                .entry(unit)
+                .or_default()
+                .push_back(entry.timestamp);
         }
 
-        // Extract unit name: "nginx.service: Start request repeated..." → "nginx.service"
-        let unit = entry
-            .unit
-            .clone()
-            .or_else(|| {
-                msg.split(':')
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| {
-                        let path = std::path::Path::new(s);
-                        path.extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case("service"))
-                            || path
-                                .extension()
-                                .is_some_and(|e| e.eq_ignore_ascii_case("timer"))
-                            || path
-                                .extension()
-                                .is_some_and(|e| e.eq_ignore_ascii_case("socket"))
-                    })
-                    .map(str::to_string)
+        let cutoff = now - time::Duration::seconds(RESTART_LOOP_WINDOW_SECS);
+        // Journal batches arrive newest-first; sort before pruning so the
+        // window and the reported first/last timestamps are chronological.
+        for times in self.restarts.values_mut() {
+            times.make_contiguous().sort_unstable();
+            while times.front().is_some_and(|timestamp| *timestamp < cutoff) {
+                times.pop_front();
+            }
+        }
+        self.restarts.retain(|_, times| !times.is_empty());
+
+        let mut candidates: HashSet<&String> = hit_limit.iter().collect();
+        candidates.extend(
+            self.restarts
+                .iter()
+                .filter(|(_, times)| times.len() >= RESTART_LOOP_THRESHOLD)
+                .map(|(unit, _)| unit),
+        );
+
+        candidates
+            .into_iter()
+            .map(|unit| {
+                let history = self.restarts.get(unit);
+                let (count, first_seen, last_seen) = match history {
+                    Some(times) if !times.is_empty() => (
+                        times.len(),
+                        *times.front().unwrap(),
+                        *times.back().unwrap(),
+                    ),
+                    _ => (1, now, now),
+                };
+
+                let (id, title, severity, description) = if hit_limit.contains(unit) {
+                    (
+                        format!("restart-storm:{unit}"),
+                        format!("Restart storm: {unit}"),
+                        Severity::Error,
+                        format!(
+                            "{unit} hit its start rate limit after {count} restart(s) in the last {} minutes.",
+                            RESTART_LOOP_WINDOW_SECS / 60,
+                        ),
+                    )
+                } else {
+                    (
+                        format!("restart-loop:{unit}"),
+                        format!("Restart loop: {unit}"),
+                        Severity::Warning,
+                        format!(
+                            "{unit} restarted {count} times in the last {} minutes and is still looping.",
+                            RESTART_LOOP_WINDOW_SECS / 60,
+                        ),
+                    )
+                };
+
+                let mut issue = Issue::new(
+                    id,
+                    severity,
+                    title,
+                    description,
+                    Some(unit.clone()),
+                    vec![],
+                    first_seen,
+                    last_seen,
+                );
+                issue.count = count;
+                issue
             })
-            .unwrap_or_else(|| "unknown".to_string());
+            .collect()
+    }
+}
 
-        let id = format!("restart-storm:{unit}");
-        let (count, first, last) =
-            storms
-                .entry(id)
-                .or_insert((0, entry.timestamp, entry.timestamp));
-        *count += 1;
-        if entry.timestamp < *first {
-            *first = entry.timestamp;
-        }
-        if entry.timestamp > *last {
-            *last = entry.timestamp;
-        }
+/// Extract the restarted unit from a restart message, if the entry is one.
+///
+/// systemd user-manager records carry `user@1000.service` in the unit field
+/// while the message names the service that actually restarted, so a unit name
+/// in the message prefix wins over the entry's unit.
+fn restart_unit(entry: &JournalEntry) -> Option<String> {
+    let message = &entry.message;
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("scheduled restart job")
+        && !lower.contains("start request repeated")
+        && !lower.contains("start-limit-hit")
+    {
+        return None;
     }
 
-    storms
-        .into_iter()
-        .map(|(id, (count, first_seen, last_seen))| {
-            let unit = id.strip_prefix("restart-storm:").unwrap_or("unknown");
-            let mut issue = Issue::new(
-                id.clone(),
-                Severity::Error,
-                format!("Restart storm: {unit}"),
-                format!(
-                    "{unit} hit its start rate limit ({count} time(s)). \
-                     The service is restarting too quickly — check for a crash loop.",
-                ),
-                Some(unit.to_string()),
-                vec![],
-                first_seen,
-                last_seen,
-            );
-            issue.count = count;
-            issue
-        })
-        .collect()
+    if let Some(prefix) = message.split(':').next() {
+        let candidate = prefix.trim();
+        if is_unit_name(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    entry.unit.clone()
+}
+
+/// True when systemd reported that the unit exhausted its start rate limit.
+fn is_start_limit_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("start request repeated") || lower.contains("start-limit-hit")
+}
+
+/// True when the string looks like a systemd unit name.
+fn is_unit_name(value: &str) -> bool {
+    [".service", ".timer", ".socket", ".scope", ".mount", ".path"]
+        .iter()
+        .any(|suffix| value.ends_with(suffix))
 }
 
 // ── Boot anomaly ──────────────────────────────────────────────────────────────
@@ -396,4 +469,196 @@ fn estimate_boot_time() -> OffsetDateTime {
     #[allow(clippy::cast_possible_wrap)]
     let secs = secs as i64;
     OffsetDateTime::now_utc() - time::Duration::seconds(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(unit: Option<&str>, message: &str, timestamp: OffsetDateTime) -> JournalEntry {
+        JournalEntry {
+            timestamp,
+            priority: 4,
+            message: message.to_string(),
+            unit: unit.map(str::to_string),
+            pid: None,
+        }
+    }
+
+    fn restart(unit: &str, counter: u32, timestamp: OffsetDateTime) -> JournalEntry {
+        entry(
+            Some(unit),
+            &format!("{unit}: Scheduled restart job, restart counter is at {counter}."),
+            timestamp,
+        )
+    }
+
+    #[test]
+    fn restart_loop_is_detected_without_start_limit() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let entries: Vec<JournalEntry> = (1..=6)
+            .map(|n| {
+                restart(
+                    "kiosk.service",
+                    n,
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+
+        let issues = detector.collect(&entries, base + time::Duration::seconds(90));
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "restart-loop:kiosk.service");
+        assert_eq!(issues[0].severity, Severity::Warning);
+        assert_eq!(issues[0].count, 6);
+        assert_eq!(issues[0].unit.as_deref(), Some("kiosk.service"));
+    }
+
+    #[test]
+    fn four_restarts_stay_below_the_threshold() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let entries: Vec<JournalEntry> = (1..=4)
+            .map(|n| {
+                restart(
+                    "kiosk.service",
+                    n,
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+
+        assert!(detector
+            .collect(&entries, base + time::Duration::seconds(60))
+            .is_empty());
+    }
+
+    #[test]
+    fn start_limit_escalates_the_issue_to_error() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let mut entries: Vec<JournalEntry> = (1..=5)
+            .map(|n| {
+                restart(
+                    "crash.service",
+                    n,
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+        entries.push(entry(
+            Some("crash.service"),
+            "crash.service: Failed with result 'start-limit-hit'.",
+            base + time::Duration::seconds(60),
+        ));
+
+        let issues = detector.collect(&entries, base + time::Duration::seconds(60));
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "restart-storm:crash.service");
+        assert_eq!(issues[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn user_unit_name_comes_from_the_message_prefix() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let entries: Vec<JournalEntry> = (1..=5)
+            .map(|n| {
+                entry(
+                    Some("user@1000.service"),
+                    &format!(
+                        "media-kiosk-browser.service: Scheduled restart job, restart counter is at {n}."
+                    ),
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+
+        let issues = detector.collect(&entries, base + time::Duration::seconds(60));
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].unit.as_deref(),
+            Some("media-kiosk-browser.service")
+        );
+    }
+
+    #[test]
+    fn history_is_pruned_outside_the_window() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let entries: Vec<JournalEntry> = (1..=4)
+            .map(|n| {
+                restart(
+                    "kiosk.service",
+                    n,
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+
+        assert!(detector
+            .collect(&entries, base + time::Duration::seconds(60))
+            .is_empty());
+        assert!(detector
+            .collect(&[], base + time::Duration::seconds(700))
+            .is_empty());
+
+        let later = base + time::Duration::seconds(900);
+        let issues = detector.collect(&[restart("kiosk.service", 6, later)], later);
+        assert!(
+            issues.is_empty(),
+            "one restart after the window must not flag"
+        );
+    }
+
+    #[test]
+    fn newest_first_batches_report_chronological_bounds() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        // The journal reader returns batches newest-first.
+        let mut entries: Vec<JournalEntry> = (1..=6)
+            .map(|n| {
+                restart(
+                    "kiosk.service",
+                    n,
+                    base + time::Duration::seconds(i64::from(n) * 10),
+                )
+            })
+            .collect();
+        entries.reverse();
+
+        let issues = detector.collect(&entries, base + time::Duration::seconds(90));
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].count, 6);
+        assert!(
+            issues[0].first_seen < issues[0].last_seen,
+            "bounds must stay chronological: {} .. {}",
+            issues[0].first_seen,
+            issues[0].last_seen
+        );
+    }
+
+    #[test]
+    fn non_restart_messages_are_ignored() {
+        let base = OffsetDateTime::now_utc();
+        let mut detector = RestartLoopDetector::default();
+        let entries: Vec<JournalEntry> = (1..=10)
+            .map(|n| {
+                entry(
+                    Some("app.service"),
+                    "app.service: Failed to start",
+                    base + time::Duration::seconds(i64::from(n)),
+                )
+            })
+            .collect();
+
+        assert!(detector
+            .collect(&entries, base + time::Duration::seconds(20))
+            .is_empty());
+    }
 }
