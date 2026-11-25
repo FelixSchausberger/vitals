@@ -10,10 +10,7 @@
 #![allow(clippy::future_not_send)]
 #![allow(clippy::redundant_closure_for_method_calls)]
 
-use std::{
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{sync::Mutex, time::UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use systemd::journal::{JournalRecord, JournalSeek, OpenOptions};
@@ -73,15 +70,22 @@ impl SystemdJournalReader {
 
     /// Convert a `JournalRecord` to our `JournalEntry` format.
     ///
-    /// Returns `None` for records without a usable `__REALTIME_TIMESTAMP` —
-    /// the caller skips them. Stamping such records with the current time
-    /// instead would resurrect stale entries as current issues on every tick
-    /// (and stall the incremental cursor, re-reporting the same slice
-    /// forever), so failing closed here is load-bearing.
+    /// `sd_journal_enumerate_data` does not expose trusted `__`-prefixed meta
+    /// fields, so a real record map never carries `__REALTIME_TIMESTAMP`; the
+    /// caller passes `sd_journal_get_realtime_usec` for the entry instead. The
+    /// map value remains the fallback for record-unit tests and journald
+    /// versions that do expose it.
+    ///
+    /// Returns `None` when neither source has a usable timestamp. Stamping such
+    /// records with the current time instead would resurrect stale entries as
+    /// current issues on every tick (and stall the incremental cursor,
+    /// re-reporting the same slice forever), so failing closed is load-bearing.
     #[allow(clippy::cast_possible_wrap)]
-    fn record_to_entry(record: &JournalRecord) -> Option<JournalEntry> {
-        let realtime = record.get("__REALTIME_TIMESTAMP")?;
-        let microseconds = realtime.parse::<u64>().ok()?;
+    fn record_to_entry(record: &JournalRecord, realtime_usec: Option<u64>) -> Option<JournalEntry> {
+        let microseconds = record
+            .get("__REALTIME_TIMESTAMP")
+            .and_then(|value| value.parse::<u64>().ok())
+            .or(realtime_usec)?;
         let system_time = UNIX_EPOCH + std::time::Duration::from_micros(microseconds);
         let timestamp = OffsetDateTime::from(system_time);
 
@@ -94,7 +98,16 @@ impl SystemdJournalReader {
             .get("MESSAGE")
             .map_or("(no message)".to_string(), |s| s.clone());
 
-        let unit = record.get("_SYSTEMD_UNIT").cloned();
+        // User-manager records carry the system-level unit in _SYSTEMD_UNIT
+        // (user@1000.service) and the service that actually logged in
+        // _SYSTEMD_USER_UNIT. The inner name is the one an operator can act
+        // on — except for the manager's own messages, whose user unit is
+        // init.scope; those stay attributed to user@1000.service.
+        let unit = record
+            .get("_SYSTEMD_USER_UNIT")
+            .filter(|user_unit| user_unit.as_str() != "init.scope")
+            .or_else(|| record.get("_SYSTEMD_UNIT"))
+            .cloned();
         let pid = record.get("_PID").and_then(|p| p.parse().ok());
 
         Some(JournalEntry {
@@ -127,8 +140,11 @@ impl JournalReader for SystemdJournalReader {
         // Choose seek strategy:
         //   1. If we have a previous read position, seek to it by opaque
         //      cursor and skip past it (incremental).
-        //   2. Otherwise use the caller's `since` time (initial / reset read).
-        //   3. If neither, seek to tail and walk backwards.
+        //   2. Otherwise start from the tail and walk back up to `limit`
+        //      entries. A time window is a lower bound, not a starting point:
+        //      seeking to its start returned the oldest slice of a busy
+        //      journal, so the one-shot analysed day-old lines and the live
+        //      issues were stale.
         let prior_cursor = self.last_cursor.lock().unwrap().clone();
         let mut skip_first = false;
 
@@ -137,31 +153,18 @@ impl JournalReader for SystemdJournalReader {
             // read is it, so skip exactly one entry below. (Verified by
             // comparing cursors rather than assuming seek/next semantics.)
             // A failed seek means the saved entry was vacuumed/rotated
-            // away — fall through to the time-window read instead of
-            // erroring the tick.
+            // away — fall through to the tail read instead of erroring the
+            // tick.
             skip_first = journal.seek_cursor(cursor).is_ok();
         }
         if !skip_first {
-            if let Some(since_time) = since {
-                let system_time: SystemTime = since_time.into();
-                #[allow(clippy::cast_possible_truncation)]
-                let since_micros = system_time
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| anyhow!("Invalid since timestamp"))?
-                    .as_micros() as u64;
+            journal
+                .seek(JournalSeek::Tail)
+                .map_err(|e| anyhow!("Failed to seek to journal tail: {e}"))?;
 
-                journal
-                    .seek_realtime_usec(since_micros)
-                    .map_err(|e| anyhow!("Failed to seek journal to timestamp: {e}"))?;
-            } else {
-                journal
-                    .seek(JournalSeek::Tail)
-                    .map_err(|e| anyhow!("Failed to seek to journal tail: {e}"))?;
-
-                for _ in 0..limit {
-                    if journal.previous().is_err() {
-                        break;
-                    }
+            for _ in 0..limit {
+                if journal.previous().is_err() {
+                    break;
                 }
             }
         }
@@ -192,8 +195,14 @@ impl JournalReader for SystemdJournalReader {
                         }
                         new_cursor = Some(cursor);
                     }
-                    match Self::record_to_entry(&record) {
-                        Some(entry) => entries.push(entry),
+                    let realtime_usec = journal.timestamp_usec().ok();
+                    match Self::record_to_entry(&record, realtime_usec) {
+                        Some(entry) => {
+                            if since.is_some_and(|cutoff| entry.timestamp < cutoff) {
+                                continue;
+                            }
+                            entries.push(entry);
+                        }
                         None => skipped_no_timestamp += 1,
                     }
                 }
@@ -255,7 +264,8 @@ impl JournalReader for SystemdJournalReader {
 
             match journal.next_entry() {
                 Ok(Some(record)) => {
-                    if let Some(entry) = Self::record_to_entry(&record) {
+                    let realtime_usec = journal.timestamp_usec().ok();
+                    if let Some(entry) = Self::record_to_entry(&record, realtime_usec) {
                         entries.push(entry);
                     }
                 }
@@ -395,7 +405,7 @@ mod tests {
             ("PRIORITY", "4"),
         ]);
 
-        let result = SystemdJournalReader::record_to_entry(&record);
+        let result = SystemdJournalReader::record_to_entry(&record, None);
         assert!(
             result.is_none(),
             "timestamp-less record must be skipped, not restamped"
@@ -410,7 +420,7 @@ mod tests {
             ("PRIORITY", "3"),
         ]);
 
-        let result = SystemdJournalReader::record_to_entry(&record);
+        let result = SystemdJournalReader::record_to_entry(&record, None);
         assert!(result.is_none());
     }
 
@@ -425,8 +435,8 @@ mod tests {
             ("_PID", "1234"),
         ]);
 
-        let entry =
-            SystemdJournalReader::record_to_entry(&record).expect("valid record must convert");
+        let entry = SystemdJournalReader::record_to_entry(&record, None)
+            .expect("valid record must convert");
         assert_eq!(entry.message, "hello");
         assert_eq!(entry.priority, 4);
         assert_eq!(entry.unit.as_deref(), Some("foo.service"));
@@ -439,11 +449,49 @@ mod tests {
     fn test_record_missing_optional_fields_uses_defaults() {
         let record = test_record(&[("__REALTIME_TIMESTAMP", "1788522330387455")]);
 
-        let entry = SystemdJournalReader::record_to_entry(&record)
+        let entry = SystemdJournalReader::record_to_entry(&record, None)
             .expect("record with only a timestamp must convert");
         assert_eq!(entry.message, "(no message)");
         assert_eq!(entry.priority, 6);
         assert_eq!(entry.unit, None);
         assert_eq!(entry.pid, None);
+    }
+
+    #[test]
+    fn test_record_timestamp_from_journal_api_when_map_omits_it() {
+        // sd_journal_enumerate_data does not expose trusted `__` fields, so a
+        // real record map has no __REALTIME_TIMESTAMP. The reader must use
+        // sd_journal_get_realtime_usec instead of dropping the record.
+        let record = test_record(&[("MESSAGE", "hello")]);
+
+        let entry = SystemdJournalReader::record_to_entry(&record, Some(1_788_522_330_387_455))
+            .expect("record with an API timestamp must convert");
+        assert_eq!(entry.timestamp.unix_timestamp(), 1_788_522_330);
+        assert_eq!(entry.message, "hello");
+    }
+
+    #[test]
+    fn test_user_unit_falls_back_to_systemd_user_unit() {
+        let record = test_record(&[
+            ("__REALTIME_TIMESTAMP", "1788522330387455"),
+            ("_SYSTEMD_USER_UNIT", "media-kiosk-browser.service"),
+        ]);
+
+        let entry = SystemdJournalReader::record_to_entry(&record, None)
+            .expect("record with a user unit must convert");
+        assert_eq!(entry.unit.as_deref(), Some("media-kiosk-browser.service"));
+    }
+
+    #[test]
+    fn test_user_manager_records_stay_on_the_user_slice() {
+        let record = test_record(&[
+            ("__REALTIME_TIMESTAMP", "1788522330387455"),
+            ("_SYSTEMD_UNIT", "user@1000.service"),
+            ("_SYSTEMD_USER_UNIT", "init.scope"),
+        ]);
+
+        let entry = SystemdJournalReader::record_to_entry(&record, None)
+            .expect("manager record must convert");
+        assert_eq!(entry.unit.as_deref(), Some("user@1000.service"));
     }
 }
