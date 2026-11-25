@@ -44,13 +44,13 @@ impl TwhsCalculator {
     /// Compute a health breakdown from issues and optional system metrics.
     ///
     /// Drop-in replacement for `HealthCalculator::update_with_metrics()`.
-    /// The `unit_metrics` parameter is accepted for API compatibility but is
-    /// not yet used by TWHS (unit resource trend probes are planned).
+    /// Per-unit metrics feed the resource-hog counter and the top-consumer
+    /// list; scoring itself stays baseline-relative and system-wide.
     pub fn compute(
         &mut self,
         issues: &[Issue],
         system_metrics: Option<&Metrics>,
-        _unit_metrics: Option<&[UnitMetrics]>,
+        unit_metrics: Option<&[UnitMetrics]>,
     ) -> HealthBreakdown {
         let now = OffsetDateTime::now_utc();
 
@@ -111,6 +111,7 @@ impl TwhsCalculator {
             .collect();
 
         // Adapt resource contribution → ResourceHealthMetrics
+        let (resource_hog_count, top_resource_consumers) = top_consumers(unit_metrics);
         let resource_metrics = snapshot.as_ref().and_then(|snap| {
             scorer_result
                 .resource_contribution
@@ -136,8 +137,8 @@ impl TwhsCalculator {
                     load_burden: rc.load_burden,
                     load_status: penalty_to_status(rc.load_penalty, self.config.resources.r_max),
                     resource_impact: -rc.total,
-                    resource_hog_count: 0,
-                    top_resource_consumers: vec![],
+                    resource_hog_count,
+                    top_resource_consumers,
                     baseline_learning_mode: scorer_result.baseline_learning_mode,
                     baseline_samples: self.baseline.sample_count,
                     min_samples_for_baseline: self.config.resources.min_samples_for_baseline,
@@ -246,5 +247,108 @@ pub fn score_to_heartbeat_color(score: f64) -> &'static str {
         s if s >= 75.0 => "green",
         s if s >= 50.0 => "yellow",
         _ => "red",
+    }
+}
+
+/// Per-unit consumers reported in the API and TUI.
+const TOP_CONSUMER_LIMIT: usize = 5;
+/// A unit at or above either threshold counts as a resource hog.
+const RESOURCE_HOG_CPU_PERCENT: f64 = 50.0;
+/// Memory threshold for the resource-hog counter, in MiB.
+const RESOURCE_HOG_MEMORY_MB: u64 = 1024;
+/// Units below both minimums are noise (and numerous) on a busy host.
+const TOP_CONSUMER_MIN_CPU: f64 = 1.0;
+/// CPU-independent minimum memory for the top-consumer list, in MiB.
+const TOP_CONSUMER_MIN_MEMORY_MB: u64 = 100;
+
+/// Rank per-unit consumers and count the units above a hog threshold.
+///
+/// `unit_metrics` is `None` when unit collection is disabled; the report then
+/// carries zero hogs and an empty list rather than inventing data.
+#[allow(clippy::cast_precision_loss)]
+fn top_consumers(unit_metrics: Option<&[UnitMetrics]>) -> (usize, Vec<ResourceConsumer>) {
+    let Some(units) = unit_metrics else {
+        return (0, Vec::new());
+    };
+
+    let mut hog_count = 0;
+    let mut consumers = Vec::new();
+
+    for unit in units {
+        let memory_mb = unit.memory_rss / (1024 * 1024);
+        if unit.cpu_usage >= RESOURCE_HOG_CPU_PERCENT || memory_mb >= RESOURCE_HOG_MEMORY_MB {
+            hog_count += 1;
+        }
+        if unit.cpu_usage < TOP_CONSUMER_MIN_CPU && memory_mb < TOP_CONSUMER_MIN_MEMORY_MB {
+            continue;
+        }
+
+        consumers.push(ResourceConsumer {
+            unit_name: unit.unit_name.clone(),
+            cpu_usage: unit.cpu_usage,
+            memory_mb,
+            // Ranking only: one percent of CPU weighs the same as 100 MiB,
+            // so a 1 GiB service outranks a 10 % one.
+            impact_score: unit.cpu_usage + memory_mb as f64 / 100.0,
+        });
+    }
+
+    consumers.sort_by(|a, b| b.impact_score.total_cmp(&a.impact_score));
+    consumers.truncate(TOP_CONSUMER_LIMIT);
+    (hog_count, consumers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit(name: &str, cpu: f64, memory_mb: u64) -> UnitMetrics {
+        UnitMetrics {
+            unit_name: name.to_string(),
+            cpu_usage: cpu,
+            memory_rss: memory_mb * 1024 * 1024,
+            memory_vsz: 0,
+            io_read_bps: 0,
+            io_write_bps: 0,
+            net_rx_bps: 0,
+            net_tx_bps: 0,
+            pids: vec![],
+        }
+    }
+
+    #[test]
+    fn no_unit_metrics_means_no_consumers() {
+        let (hog_count, consumers) = top_consumers(None);
+        assert_eq!(hog_count, 0);
+        assert!(consumers.is_empty());
+    }
+
+    #[test]
+    fn hogs_and_ranking_cover_cpu_and_memory() {
+        let units = [
+            unit("cpu.service", 80.0, 200),
+            unit("memory.service", 5.0, 2048),
+            unit("idle.service", 0.5, 10),
+        ];
+
+        let (hog_count, consumers) = top_consumers(Some(&units));
+
+        assert_eq!(hog_count, 2, "80 % CPU and 2 GiB are both hogs");
+        assert_eq!(consumers.len(), 2, "the idle unit is filtered out");
+        assert_eq!(consumers[0].unit_name, "cpu.service");
+        assert_eq!(consumers[1].unit_name, "memory.service");
+        assert_eq!(consumers[1].memory_mb, 2048);
+    }
+
+    #[test]
+    fn consumer_list_is_capped() {
+        let units: Vec<UnitMetrics> = (0..8)
+            .map(|i| unit(&format!("u{i}.service"), 10.0 + f64::from(i), 200))
+            .collect();
+
+        let (_, consumers) = top_consumers(Some(&units));
+
+        assert_eq!(consumers.len(), TOP_CONSUMER_LIMIT);
+        assert_eq!(consumers[0].unit_name, "u7.service");
     }
 }
